@@ -12,7 +12,6 @@ interface SynthExports {
   memory: WebAssembly.Memory;
   init(seed: number, sampleRate: number): void;
   set_param(id: number, v: number): void;
-  set_scene(scene: number): void;
   note_on(note: number, vel: number): void;
   note_off(note: number): void;
   xy(x: number, y: number, down: number): void;
@@ -23,7 +22,6 @@ interface SynthExports {
 
 export type SynthMessage =
   | { t: 'p'; id: number; v: number }
-  | { t: 'scene'; i: number }
   | { t: 'on'; n: number; v: number }
   | { t: 'off'; n: number }
   | { t: 'xy'; x: number; y: number; d: boolean }
@@ -32,22 +30,18 @@ export type SynthMessage =
 class NovemberRainSynth extends AudioWorkletProcessor {
   private x: SynthExports;
 
-  constructor(options: { processorOptions: { wasm: ArrayBuffer; seed: number; scene: number; params: number[] } }) {
+  constructor(options: { processorOptions: { wasm: ArrayBuffer; seed: number; params: number[] } }) {
     super();
     const o = options.processorOptions;
     const instance = new WebAssembly.Instance(new WebAssembly.Module(o.wasm), {});
     this.x = instance.exports as unknown as SynthExports;
     this.x.init(o.seed, sampleRate);
-    this.x.set_scene(o.scene);
     o.params.forEach((v, i) => this.x.set_param(i, v));
     this.port.onmessage = (e: MessageEvent<SynthMessage>) => {
       const m = e.data;
       switch (m.t) {
         case 'p':
           this.x.set_param(m.id, m.v);
-          break;
-        case 'scene':
-          this.x.set_scene(m.i);
           break;
         case 'on':
           this.x.note_on(m.n, m.v);

@@ -15,15 +15,16 @@ uniform vec2 uRes;
 uniform float uTime;
 uniform vec3 uCamPos;
 uniform vec3 uCamTgt;
-uniform vec4 uD[80];   // scene state written by the Rust simulation
-uniform vec4 uP;       // intensity, density, fog, warp
+uniform vec4 uD[130];  // world state written by the Rust simulation
+uniform vec4 uP;       // storm, rain, sand, hyper lens
+uniform vec4 uQ;       // tesseract, dune fold, 0, 0
 uniform vec4 uAudio;   // bass, mid, high, level
 uniform float uW;      // position along the 4th dimension
 out vec4 fragColor;
 
 #define PI 3.14159265
 #define TAU 6.2831853
-#define T (uD[78].x)
+#define T (uD[128].x)
 
 float hash11(float p) { p = fract(p * .1031); p *= p + 33.33; p *= p + p; return fract(p); }
 float hash21(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -95,7 +96,14 @@ vec3 camRay(vec2 fc, out vec3 ro) {
   vec3 rd = normalize(f * 1.55 + r * uv.x + u * uv.y);
   float wp = uP.w;
   if (wp > .002) {
-    // Bend the lens with a vector field sampled from 4D noise: the picture folds through w.
+    // Hyper lens: treat the image plane as a slice of 4-space, rotate it through the
+    // xw and yw planes and project back with a 4D perspective divide.
+    vec4 h = vec4(uv, 1.55, 0.);
+    h.xw = rot(wp * .9 * sin(uW * .5)) * h.xw;
+    h.yw = rot(wp * .9 * cos(uW * .37)) * h.yw;
+    h.xy /= 1. + h.w * .45;
+    rd = normalize(f * h.z + r * h.x + u * h.y);
+    // ...then let a vector field sampled from 4D noise fold it further.
     vec3 q = vec3(uv * 1.3, T * .05);
     vec3 n = vec3(noise4(q, uW), noise4(q + 9.1, uW), noise4(q + 4.7, uW)) - .5;
     rd = normalize(rd + (r * n.x + u * n.y + f * n.z) * wp * .7);

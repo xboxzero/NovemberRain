@@ -1,13 +1,10 @@
 // WebGL2 renderer: raymarched scene -> HDR target -> composite (trails, bloom, inputs) -> grade.
 
 import { VERT } from './shaders/common';
-import { STORM } from './shaders/storm';
-import { ABYSS } from './shaders/abyss';
-import { VOLCANO } from './shaders/volcano';
-import { TITAN } from './shaders/titan';
+import { WORLD } from './shaders/world';
 import { COMPOSITE, FINAL } from './shaders/post';
 
-const SCENES = [STORM, ABYSS, VOLCANO, TITAN];
+export type Uniforms = Record<string, number | number[] | Float32Array>;
 
 interface Program {
   prog: WebGLProgram;
@@ -30,24 +27,12 @@ interface Target {
 }
 
 export interface Frame {
-  scene: number;
-  time: number;
-  camPos: [number, number, number];
-  camTgt: [number, number, number];
-  data: Float32Array;
-  p: [number, number, number, number];
-  audio: [number, number, number, number];
-  w: number;
-  feedback: number;
-  bloom: number;
-  kaleido: number;
-  glitch: number;
-  camMix: number;
-  vidMix: number;
-  hue: number;
-  sat: number;
-  bright: number;
-  contrast: number;
+  /** Uniforms of the world shader. */
+  world: Uniforms;
+  /** Uniforms of the FX chain. */
+  fx: Uniforms;
+  /** Uniforms of the final grade. */
+  grade: Uniforms;
   cam: HTMLVideoElement | null;
   vid: HTMLVideoElement | null;
 }
@@ -59,8 +44,11 @@ export class Renderer {
   private hdr: boolean;
   private parallel: { COMPLETION_STATUS_KHR: number } | null;
   private pending: Pending[] = [];
-  private scenes: (Program | null)[] = [null, null, null, null];
-  private loading: (Promise<Program> | null)[] = [null, null, null, null];
+  private world: Program | null = null;
+  private loading: Promise<Program> | null = null;
+  /** Fixed output height in pixels (0 = follow the window). */
+  fixedHeight = 0;
+  readonly maxSize: number;
   private composite!: Program;
   private final!: Program;
   private sceneT: Target | null = null;
@@ -76,6 +64,7 @@ export class Renderer {
     this.gl = gl;
     this.hdr = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float'));
     this.parallel = gl.getExtension('KHR_parallel_shader_compile');
+    this.maxSize = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE) as number, gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number);
     this.vao = gl.createVertexArray()!;
     gl.bindVertexArray(this.vao);
     this.camTex = this.videoTexture();
@@ -136,17 +125,30 @@ export class Renderer {
     });
   }
 
-  /** Make sure the shader of a scene is compiled. Resolves when it can be drawn. */
-  prepare(scene: number): Promise<void> {
-    if (!this.loading[scene]) {
-      this.loading[scene] = this.build(SCENES[scene]).then((p) => (this.scenes[scene] = p));
-      this.loading[scene]!.catch(() => (this.loading[scene] = null));
+  /** Compile the world shader. Resolves when it can be drawn. */
+  prepare(): Promise<void> {
+    if (!this.loading) {
+      this.loading = this.build(WORLD).then((p) => (this.world = p));
+      this.loading.catch(() => (this.loading = null));
     }
-    return this.loading[scene]!.then(() => undefined);
+    return this.loading.then(() => undefined);
   }
 
-  ready(scene: number): boolean {
-    return !!this.scenes[scene];
+  get ready(): boolean {
+    return !!this.world;
+  }
+
+  private apply(p: Program, u: Uniforms): void {
+    const gl = this.gl;
+    for (const name in u) {
+      const v = u[name];
+      const loc = this.u(p, name);
+      if (!loc) continue;
+      if (typeof v === 'number') gl.uniform1f(loc, v);
+      else if (name === 'uD' || v.length === 4) gl.uniform4fv(loc, v);
+      else if (v.length === 3) gl.uniform3fv(loc, v);
+      else gl.uniform2fv(loc, v);
+    }
   }
 
   private u(p: Program, name: string): WebGLUniformLocation | null {
@@ -181,15 +183,46 @@ export class Renderer {
     return { fbo, tex, w, h };
   }
 
-  /** Match the drawing buffer to the CSS size. Returns true when it changed. */
-  resize(maxDpr = 1.5): boolean {
-    const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
-    const w = Math.max(2, Math.round(this.canvas.clientWidth * dpr));
-    const h = Math.max(2, Math.round(this.canvas.clientHeight * dpr));
+  /**
+   * Size the drawing buffer. Normally it follows the window (capped at `maxDpr`);
+   * with `fixedHeight` set it renders at that many lines regardless of the window,
+   * e.g. 4320 for 8K. Returns true when the size changed.
+   */
+  resize(maxDpr = 2): boolean {
+    const cw = Math.max(1, this.canvas.clientWidth);
+    const ch = Math.max(1, this.canvas.clientHeight);
+    let w: number;
+    let h: number;
+    if (this.fixedHeight > 0) {
+      h = this.fixedHeight;
+      w = Math.round((h * cw) / ch);
+      const k = Math.min(1, this.maxSize / Math.max(w, h));
+      w = Math.round(w * k);
+      h = Math.round(h * k);
+    } else {
+      const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
+      w = Math.round(cw * dpr);
+      h = Math.round(ch * dpr);
+    }
+    w = Math.max(2, w);
+    h = Math.max(2, h);
     if (this.canvas.width === w && this.canvas.height === h) return false;
     this.canvas.width = w;
     this.canvas.height = h;
     return true;
+  }
+
+  /** Release the off-screen targets (after a one-off high-resolution render). */
+  freeTargets(): void {
+    const gl = this.gl;
+    for (const t of [this.sceneT, this.fb[0], this.fb[1]]) {
+      if (t) {
+        gl.deleteFramebuffer(t.fbo);
+        gl.deleteTexture(t.tex);
+      }
+    }
+    this.sceneT = null;
+    this.fb = [null, null];
   }
 
   private upload(tex: WebGLTexture, v: HTMLVideoElement | null, unit: number): void {
@@ -210,8 +243,8 @@ export class Renderer {
   render(f: Frame): void {
     const gl = this.gl;
     this.poll();
-    const scene = this.scenes[f.scene];
-    if (!scene || !this.composite || !this.final) return;
+    const world = this.world;
+    if (!world || !this.composite || !this.final) return;
     const W = this.canvas.width;
     const H = this.canvas.height;
     const sw = Math.max(2, Math.round(W * this.scale));
@@ -221,24 +254,18 @@ export class Renderer {
     this.fb[1] = this.target(this.fb[1], W, H, false);
     gl.bindVertexArray(this.vao);
 
-    // 1. raymarched scene
+    // 1. raymarched world
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneT.fbo);
     gl.viewport(0, 0, sw, sh);
-    gl.useProgram(scene.prog);
-    gl.uniform2f(this.u(scene, 'uRes'), sw, sh);
-    gl.uniform1f(this.u(scene, 'uTime'), f.time);
-    gl.uniform3fv(this.u(scene, 'uCamPos'), f.camPos);
-    gl.uniform3fv(this.u(scene, 'uCamTgt'), f.camTgt);
-    gl.uniform4fv(this.u(scene, 'uD'), f.data);
-    gl.uniform4fv(this.u(scene, 'uP'), f.p);
-    gl.uniform4fv(this.u(scene, 'uAudio'), f.audio);
-    gl.uniform1f(this.u(scene, 'uW'), f.w);
+    gl.useProgram(world.prog);
+    gl.uniform2f(this.u(world, 'uRes'), sw, sh);
+    this.apply(world, f.world);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.sceneT.tex);
     gl.generateMipmap(gl.TEXTURE_2D);
 
-    // 2. composite into the feedback buffer
+    // 2. FX chain into the feedback buffer
     const dst = this.fb[this.flip]!;
     const prev = this.fb[1 - this.flip]!;
     const c = this.composite;
@@ -247,21 +274,16 @@ export class Renderer {
     gl.useProgram(c.prog);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, prev.tex);
-    this.upload(this.camTex, f.camMix > 0 ? f.cam : null, 2);
-    this.upload(this.vidTex, f.vidMix > 0 ? f.vid : null, 3);
+    this.upload(this.camTex, f.cam, 2);
+    this.upload(this.vidTex, f.vid, 3);
     gl.uniform1i(this.u(c, 'uScene'), 0);
     gl.uniform1i(this.u(c, 'uPrev'), 1);
     gl.uniform1i(this.u(c, 'uCam'), 2);
     gl.uniform1i(this.u(c, 'uVid'), 3);
     gl.uniform2f(this.u(c, 'uRes'), W, H);
-    gl.uniform1f(this.u(c, 'uTime'), f.time);
-    gl.uniform1f(this.u(c, 'uFeedback'), f.feedback);
-    gl.uniform1f(this.u(c, 'uBloom'), f.bloom);
-    gl.uniform1f(this.u(c, 'uKaleido'), f.kaleido);
-    gl.uniform1f(this.u(c, 'uGlitch'), f.glitch);
-    gl.uniform1f(this.u(c, 'uCamMix'), f.camMix);
-    gl.uniform1f(this.u(c, 'uVidMix'), f.vidMix);
-    gl.uniform4fv(this.u(c, 'uAudio'), f.audio);
+    // Keep the bloom radius constant on screen whatever the render resolution.
+    gl.uniform1f(this.u(c, 'uLod'), Math.max(0, Math.log2(sh / 420)));
+    this.apply(c, f.fx);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     // 3. grade to the screen
@@ -273,12 +295,7 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, dst.tex);
     gl.uniform1i(this.u(fin, 'uTex'), 0);
     gl.uniform2f(this.u(fin, 'uRes'), W, H);
-    gl.uniform1f(this.u(fin, 'uTime'), f.time);
-    gl.uniform1f(this.u(fin, 'uHue'), f.hue);
-    gl.uniform1f(this.u(fin, 'uSat'), f.sat);
-    gl.uniform1f(this.u(fin, 'uBright'), f.bright);
-    gl.uniform1f(this.u(fin, 'uContrast'), f.contrast);
-    gl.uniform1f(this.u(fin, 'uGlitch'), f.glitch);
+    this.apply(fin, f.grade);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     this.flip = 1 - this.flip;
   }

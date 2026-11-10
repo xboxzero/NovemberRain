@@ -33,29 +33,6 @@ body {
   isolation: isolate;
 }
 
-#yt {
-  position: absolute;
-  inset: 0;
-  display: none;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-#yt.on {
-  display: block;
-}
-
-/* Cover the viewport with the 16:9 player. */
-#yt iframe {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: max(100vw, 177.78vh);
-  height: max(100vh, 56.25vw);
-  transform: translate(-50%, -50%);
-  border: 0;
-}
-
 #view {
   position: absolute;
   inset: 0;
@@ -293,7 +270,7 @@ details[open] > summary {
 
 .slider {
   display: grid;
-  grid-template-columns: 96px 1fr 34px;
+  grid-template-columns: 104px 1fr 34px;
   align-items: center;
   gap: 8px;
   margin: 3px 0;
@@ -305,6 +282,12 @@ details[open] > summary {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.slider select {
+  grid-column: 2 / 4;
+  min-height: 28px;
+  padding: 3px 6px;
 }
 
 .slider output {

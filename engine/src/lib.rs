@@ -8,14 +8,13 @@ mod rng;
 mod sim;
 mod synth;
 
-use params::{scene_defaults, NP, NSCENES};
+use params::{defaults, NP};
 use rng::Rng;
 use sim::Sim;
 use synth::Synth;
 
 struct Engine {
     params: [f32; NP],
-    scene: usize,
     sim: Sim,
     synth: Synth,
     rng: Rng,
@@ -27,13 +26,12 @@ struct Engine {
 impl Engine {
     fn new(seed: u32, sample_rate: f32) -> Self {
         Engine {
-            params: scene_defaults(0),
-            scene: 0,
+            params: defaults(),
             sim: Sim::new(seed),
             synth: Synth::new(seed, sample_rate),
             rng: Rng::new(seed ^ 0xC0FF_EE11),
             text: String::new(),
-            defaults: scene_defaults(0),
+            defaults: defaults(),
             describe: params::describe_json(),
         }
     }
@@ -116,25 +114,10 @@ pub extern "C" fn params_ptr() -> *const f32 {
     eng().params.as_ptr()
 }
 
-/// Pointer to the default parameter values (NP floats) of a built-in scene preset.
+/// Pointer to the default parameter values (NP floats) of preset 1.
 #[no_mangle]
-pub extern "C" fn scene_defaults_ptr(scene: usize) -> *const f32 {
-    let e = eng();
-    e.defaults = scene_defaults(scene.min(NSCENES - 1));
-    e.defaults.as_ptr()
-}
-
-#[no_mangle]
-pub extern "C" fn set_scene(scene: usize) {
-    let e = eng();
-    e.scene = scene.min(NSCENES - 1);
-    e.sim.set_scene(e.scene);
-    e.synth.set_scene(e.scene);
-}
-
-#[no_mangle]
-pub extern "C" fn get_scene() -> usize {
-    eng().scene
+pub extern "C" fn defaults_ptr() -> *const f32 {
+    eng().defaults.as_ptr()
 }
 
 // ---- simulation --------------------------------------------------------------------
@@ -166,6 +149,14 @@ pub extern "C" fn events_len() -> usize {
     eng().sim.n_events
 }
 
+/// Throw a lightning bolt right now; `to_titan` != 0 aims it at the skull.
+#[no_mangle]
+pub extern "C" fn strike(to_titan: u32) {
+    let e = eng();
+    let fold = e.params[params::FOLD];
+    e.sim.strike(1.0, to_titan != 0, fold);
+}
+
 // ---- chat ----------------------------------------------------------------------------
 
 /// Parse a UTF-8 chat message. Returns a pointer to a JSON string; its length is `text_len()`.
@@ -178,7 +169,7 @@ pub unsafe extern "C" fn chat(ptr: *const u8, len: usize) -> *const u8 {
     let bytes = core::slice::from_raw_parts(ptr, len);
     let input = String::from_utf8_lossy(bytes);
     let seed = e.rng.next();
-    e.text = chat::parse(&input, &e.params, e.scene, seed);
+    e.text = chat::parse(&input, &e.params, seed);
     e.text.as_ptr()
 }
 

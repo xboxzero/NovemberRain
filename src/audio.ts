@@ -35,7 +35,7 @@ export class AudioEngine {
     return this.ctx;
   }
 
-  async start(wasm: ArrayBuffer, scene: number, params: number[]): Promise<void> {
+  async start(wasm: ArrayBuffer, params: number[]): Promise<void> {
     const ctx = await this.context();
     if (this.node) return;
     await ctx.audioWorklet.addModule(workletUrl);
@@ -43,7 +43,7 @@ export class AudioEngine {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
-      processorOptions: { wasm, seed: (Math.random() * 0xffffffff) >>> 0, scene, params },
+      processorOptions: { wasm, seed: (Math.random() * 0xffffffff) >>> 0, params },
     });
     this.analyser = ctx.createAnalyser();
     this.analyser.fftSize = 2048;

@@ -10,7 +10,6 @@
   </head>
   <body>
     <div id="stage">
-      <div id="yt"></div>
       <canvas id="view"></canvas>
     </div>
 
@@ -29,7 +28,7 @@
 
       <aside id="panel" aria-label="Controls">
         <details open>
-          <summary>Inputs</summary>
+          <summary>Inputs &amp; output</summary>
           <div class="grid" id="devices">
             <button data-dev="camera">Camera</button>
             <button data-dev="mic">Mic</button>
@@ -37,35 +36,21 @@
             <button data-dev="file">Video file</button>
             <button data-dev="xy">XY synth pad</button>
           </div>
-          <form id="yt-form" class="row">
-            <input id="yt-url" type="text" inputmode="url" placeholder="YouTube link or id" autocomplete="off" />
-            <button type="submit">Mix</button>
-          </form>
           <div class="row">
-            <label for="blend">Blend</label>
-            <select id="blend">
-              <option value="screen">Screen</option>
-              <option value="lighten">Lighten</option>
-              <option value="plus-lighter">Add</option>
-              <option value="difference">Difference</option>
-              <option value="exclusion">Exclusion</option>
-              <option value="overlay">Overlay</option>
-              <option value="hard-light">Hard light</option>
-              <option value="soft-light">Soft light</option>
-              <option value="color-dodge">Dodge</option>
-              <option value="multiply">Multiply</option>
-              <option value="normal">Normal</option>
+            <label for="res">Output</label>
+            <select id="res">
+              <option value="auto">Auto (adaptive)</option>
+              <option value="1080p">1080p</option>
+              <option value="1440p">1440p</option>
+              <option value="4k">4K</option>
+              <option value="8k">8K</option>
             </select>
-            <button id="yt-off" type="button">Remove</button>
+            <button id="btn-snap" type="button" title="Render one frame at 8K and save it as PNG">8K still</button>
           </div>
         </details>
 
         <details open>
-          <summary>Preset 5 &middot; Custom</summary>
-          <div class="row">
-            <label for="base-scene">World</label>
-            <select id="base-scene"></select>
-          </div>
+          <summary>Preset 2 &middot; Custom</summary>
           <form id="save-form" class="row">
             <input id="save-name" type="text" placeholder="Name this look" maxlength="60" autocomplete="off" />
             <button type="submit">Save</button>
@@ -79,14 +64,14 @@
         </details>
 
         <div id="sliders"></div>
-        <p class="hint">Keys A&ndash;K play notes &middot; Z/X octave &middot; 1&ndash;5 presets &middot; drag to orbit &middot; scroll or pinch to zoom &middot; Tab hides the interface</p>
+        <p class="hint">Keys A&ndash;K play notes &middot; Z/X octave &middot; Space throws lightning &middot; 1&ndash;2 presets &middot; drag to orbit &middot; scroll or pinch to zoom &middot; Tab hides the interface</p>
       </aside>
 
       <section id="chat" aria-label="Chat">
         <div id="log" aria-live="polite"></div>
         <div id="chips"></div>
         <form id="chat-form">
-          <input id="chat-input" type="text" placeholder="Tell me what to change…  e.g. more lightning, less fog" autocomplete="off" enterkeyhint="send" />
+          <input id="chat-input" type="text" placeholder="Tell me what to change…  e.g. more lightning, make it trippy" autocomplete="off" enterkeyhint="send" />
           <button type="submit">Send</button>
         </form>
       </section>
@@ -99,8 +84,8 @@
     <div id="splash">
       <div class="card">
         <h1>NOVEMBER<b>RAIN</b></h1>
-        <p>An experimental visual + sound instrument for the browser. Four raymarched 4D worlds, a generative synthesizer, and a chat box that understands plain language.</p>
-        <p class="small">Connect your camera, microphone, screen, keyboard, mouse or touchscreen. Mix in YouTube. Save your own presets.</p>
+        <p>A titan skeleton walks through sand dunes under a thunderstorm. Bend it through the fourth dimension, run it through a psychedelic effect chain, and steer everything by chat.</p>
+        <p class="small">Physically simulated motion, a well-tempered synthesizer, up to 8K output. Connect your camera, microphone, screen, keyboard, mouse or touchscreen.</p>
         <button id="start">Start with sound</button>
         <button id="start-silent" class="ghost">Start silent</button>
         <p id="splash-status" class="small"></p>

@@ -1,169 +1,137 @@
 #![allow(dead_code)]
 //! The parameter table is the single source of truth shared by the simulation,
-//! the synthesizer, the chat parser and (via `params_json`) the TypeScript UI.
-//! Every parameter is normalised to 0..1.
+//! the synthesizer, the chat parser and (via `describe_json`) the TypeScript UI.
+//! Every parameter is normalised to 0..1. A parameter with `options` is a
+//! selector: its value is `index / (options - 1)`.
 
 pub struct ParamDef {
     pub key: &'static str,
     pub label: &'static str,
     pub group: &'static str,
     pub default: f32,
+    pub options: &'static [&'static str],
     /// Words / phrases the chat parser recognises for this parameter.
     pub words: &'static [&'static str],
 }
 
-pub const NP: usize = 32;
-
-pub const SPEED: usize = 0;
-pub const INTENSITY: usize = 1;
-pub const DENSITY: usize = 2;
-pub const ORBIT: usize = 3;
-pub const ZOOM: usize = 4;
-pub const WARP: usize = 5;
-pub const WSPEED: usize = 6;
-pub const FOG: usize = 7;
-pub const HUE: usize = 8;
-pub const SATURATION: usize = 9;
-pub const BRIGHTNESS: usize = 10;
-pub const CONTRAST: usize = 11;
-pub const BLOOM: usize = 12;
-pub const FEEDBACK: usize = 13;
-pub const KALEIDO: usize = 14;
-pub const GLITCH: usize = 15;
-pub const REACT: usize = 16;
-pub const CAMMIX: usize = 17;
-pub const VIDMIX: usize = 18;
-pub const YTMIX: usize = 19;
-pub const VOLUME: usize = 20;
-pub const PITCH: usize = 21;
-pub const CUTOFF: usize = 22;
-pub const RESONANCE: usize = 23;
-pub const DRONE: usize = 24;
-pub const TEXTURE: usize = 25;
-pub const MELODY: usize = 26;
-pub const TEMPO: usize = 27;
-pub const REVERB: usize = 28;
-pub const DELAY: usize = 29;
-pub const FM: usize = 30;
-pub const IMPACT: usize = 31;
-
-macro_rules! p {
-    ($k:expr, $l:expr, $g:expr, $d:expr, [$($w:expr),*]) => {
-        ParamDef { key: $k, label: $l, group: $g, default: $d, words: &[$($w),*] }
+macro_rules! table {
+    ($( $id:ident = $k:expr, $l:expr, $g:expr, $d:expr, [$($o:expr),*], [$($w:expr),*]; )*) => {
+        table!(@consts 0usize; $($id,)*);
+        pub const PARAMS: &[ParamDef] = &[
+            $( ParamDef { key: $k, label: $l, group: $g, default: $d, options: &[$($o),*], words: &[$($w),*] }, )*
+        ];
     };
+    (@consts $n:expr; $id:ident, $($rest:ident,)*) => {
+        pub const $id: usize = $n;
+        table!(@consts $n + 1usize; $($rest,)*);
+    };
+    (@consts $n:expr;) => { pub const NP: usize = $n; };
 }
 
-pub const PARAMS: [ParamDef; NP] = [
-    p!("speed", "Speed", "Motion", 0.5, ["speed", "motion speed", "animation speed", "pace"]),
-    p!("intensity", "Intensity", "Motion", 0.55, ["intensity", "energy", "power", "strength", "lightning", "storm", "thunder", "bolts", "glow", "bioluminescence", "lava", "eruption", "eruptions", "fire", "flames", "rage", "shake", "stomp"]),
-    p!("density", "Density", "Motion", 0.6, ["density", "amount", "count", "creatures", "creature", "fish", "jellyfish", "jellies", "dragons", "buildings", "skyscrapers", "towers", "rain", "dunes", "population"]),
-    p!("orbit", "Auto orbit", "Motion", 0.3, ["orbit", "auto orbit", "rotation", "spin", "camera speed", "camera rotation"]),
-    p!("zoom", "Zoom", "Motion", 0.5, ["zoom", "camera distance", "distance"]),
-    p!("warp", "4D warp", "Motion", 0.15, ["warp", "4d warp", "4d", "distortion", "distort", "morph", "bend", "wobble"]),
-    p!("wspeed", "4D drift", "Motion", 0.3, ["4d drift", "drift", "4d speed", "fourth dimension", "w speed", "evolution", "morph speed"]),
-    p!("fog", "Fog", "Look", 0.4, ["fog", "mist", "haze", "smoke", "dust", "sandstorm", "murk", "atmosphere"]),
-    p!("hue", "Hue shift", "Look", 0.0, ["hue", "hue shift", "color shift", "colour shift"]),
-    p!("saturation", "Saturation", "Look", 0.55, ["saturation", "color amount", "colour amount", "vibrance", "colors", "colours"]),
-    p!("brightness", "Brightness", "Look", 0.5, ["brightness", "exposure", "light", "gain"]),
-    p!("contrast", "Contrast", "Look", 0.5, ["contrast"]),
-    p!("bloom", "Bloom", "FX", 0.45, ["bloom", "glare", "shine", "halo"]),
-    p!("feedback", "Trails", "FX", 0.0, ["trails", "trail", "feedback", "echo trails", "smear", "ghosting", "persistence"]),
-    p!("kaleido", "Kaleidoscope", "FX", 0.0, ["kaleidoscope", "kaleido", "mirror", "mirrors", "symmetry"]),
-    p!("glitch", "Glitch", "FX", 0.0, ["glitch", "glitches", "noise fx", "corruption", "datamosh", "rgb split", "chromatic"]),
-    p!("react", "Audio react", "FX", 0.6, ["audio react", "audio reactivity", "reactivity", "reactive", "sound reaction", "music reaction", "react"]),
-    p!("cammix", "Camera mix", "Mix", 0.6, ["camera mix", "webcam mix", "cam mix", "camera opacity", "camera level", "webcam level"]),
-    p!("vidmix", "Video mix", "Mix", 0.6, ["video mix", "screen mix", "capture mix", "video opacity", "video level"]),
-    p!("ytmix", "YouTube mix", "Mix", 0.8, ["youtube mix", "youtube opacity", "youtube level", "yt mix", "youtube"]),
-    p!("volume", "Volume", "Sound", 0.7, ["volume", "loudness", "sound level", "master", "master volume", "audio level"]),
-    p!("pitch", "Pitch", "Sound", 0.5, ["pitch", "key", "tuning", "root note", "transpose"]),
-    p!("cutoff", "Filter", "Sound", 0.5, ["filter", "cutoff", "filter cutoff", "tone", "brightness of sound", "treble"]),
-    p!("resonance", "Resonance", "Sound", 0.3, ["resonance", "res", "q"]),
-    p!("drone", "Drone", "Sound", 0.6, ["drone", "bass", "pad", "sub", "bass drone", "low end"]),
-    p!("texture", "Ambience", "Sound", 0.6, ["ambience", "ambient", "ambient sound", "wind", "bubbles", "rumble", "texture", "atmosphere sound", "background sound"]),
-    p!("melody", "Melody", "Sound", 0.45, ["melody", "notes", "sequencer", "sequence", "arpeggio", "arp", "bells", "music"]),
-    p!("tempo", "Tempo", "Sound", 0.4, ["tempo", "bpm", "rhythm speed", "beat"]),
-    p!("reverb", "Reverb", "Sound", 0.55, ["reverb", "space", "room", "hall"]),
-    p!("delay", "Echo", "Sound", 0.35, ["echo", "delay", "echoes"]),
-    p!("fm", "FM", "Sound", 0.2, ["fm", "fm amount", "metallic", "harmonics", "modulation"]),
-    p!("impact", "Impacts", "Sound", 0.7, ["impacts", "impact", "thunder volume", "footsteps", "footstep", "roar", "roars", "hits", "sound effects", "sfx"]),
-];
+table! {
+    SPEED = "speed", "Speed", "World", 0.5, [], ["speed", "motion speed", "walking speed", "pace"];
+    STORM = "storm", "Lightning", "World", 0.55, [], ["lightning", "storm", "thunder", "thunderstorm", "bolts", "strikes", "intensity", "energy", "power", "rage"];
+    WIND = "wind", "Wind", "World", 0.5, [], ["wind", "gusts", "gale", "breeze"];
+    RAIN = "rain", "Rain", "World", 0.5, [], ["rain", "rainfall", "downpour", "drizzle"];
+    SAND = "sand", "Blowing sand", "World", 0.4, [], ["sand", "blowing sand", "sandstorm", "dust", "fog", "haze", "mist", "atmosphere"];
+    ORBIT = "orbit", "Auto orbit", "World", 0.15, [], ["orbit", "auto orbit", "rotation", "spin", "camera speed", "camera rotation"];
+    ZOOM = "zoom", "Zoom", "World", 0.62, [], ["zoom", "camera distance", "distance"];
 
-pub const NSCENES: usize = 4;
-pub const SCENE_KEYS: [&str; NSCENES] = ["storm", "abyss", "volcano", "titan"];
-pub const SCENE_NAMES: [&str; NSCENES] = [
-    "Multi-lightning storm over the sand dunes",
-    "Underwater abyss with deep sea creatures",
-    "Volcano island with a Chinese dragon",
-    "Titan skeleton walking through the city",
-];
+    WARP = "warp", "Hyper lens", "4D", 0.12, [], ["hyper lens", "warp", "4d warp", "lens", "distortion", "distort", "bend", "wobble"];
+    WSPEED = "wspeed", "4D drift", "4D", 0.3, [], ["4d drift", "drift", "4d speed", "fourth dimension", "w speed", "evolution"];
+    TESS = "tess", "Tesseract", "4D", 0.35, [], ["tesseract", "hypercube", "4d cube", "hyper cube", "cube"];
+    FOLD = "fold", "Dune fold", "4D", 0.25, [], ["dune fold", "fold", "folding", "morph", "dune morph", "terrain morph"];
 
-/// Default parameter set for a scene (the four built-in presets).
-pub fn scene_defaults(scene: usize) -> [f32; NP] {
+    HUE = "hue", "Hue shift", "Look", 0.0, [], ["hue", "hue shift", "color shift", "colour shift"];
+    SATURATION = "saturation", "Saturation", "Look", 0.55, [], ["saturation", "vibrance", "colors", "colours", "color amount"];
+    BRIGHTNESS = "brightness", "Brightness", "Look", 0.5, [], ["brightness", "exposure", "light", "gain"];
+    CONTRAST = "contrast", "Contrast", "Look", 0.5, [], ["contrast"];
+    BLOOM = "bloom", "Bloom", "Look", 0.5, [], ["bloom", "glare", "glow", "halo", "shine"];
+
+    ROUTE = "route", "FX routing", "Psychedelic FX", 0.0, ["Serial", "Parallel"], ["fx routing", "visual routing", "routing", "signal", "signal flow", "signal path"];
+    KALEIDO = "kaleido", "Kaleidoscope", "Psychedelic FX", 0.0, [], ["kaleidoscope", "kaleido", "mirror", "mirrors", "symmetry"];
+    KSEG = "kseg", "\u{21b3} segments", "Psychedelic FX", 0.35, [], ["segments", "kaleidoscope segments", "mirror count", "slices", "petals"];
+    KSPIN = "kspin", "\u{21b3} spin", "Psychedelic FX", 0.2, [], ["kaleidoscope spin", "mirror spin", "kaleidoscope rotation", "kaleidoscope speed"];
+    FEEDBACK = "feedback", "Trails", "Psychedelic FX", 0.0, [], ["trails", "trail", "feedback", "smear", "ghosting", "persistence", "echo trails"];
+    FBZOOM = "fbzoom", "\u{21b3} zoom", "Psychedelic FX", 0.55, [], ["trail zoom", "feedback zoom", "trails zoom"];
+    FBROT = "fbrot", "\u{21b3} twist", "Psychedelic FX", 0.55, [], ["trail twist", "feedback twist", "trail rotation", "feedback rotation", "twist", "swirl"];
+    FBHUE = "fbhue", "\u{21b3} colour cycle", "Psychedelic FX", 0.0, [], ["trail colour", "trail color", "feedback colour", "feedback color", "colour cycle", "color cycle", "rainbow trails"];
+    TUNNEL = "tunnel", "Tunnel", "Psychedelic FX", 0.0, [], ["tunnel", "vortex", "wormhole", "infinite zoom", "droste"];
+    TUNSPEED = "tunspeed", "\u{21b3} speed", "Psychedelic FX", 0.4, [], ["tunnel speed", "vortex speed", "wormhole speed"];
+    LIQUID = "liquid", "Liquid", "Psychedelic FX", 0.0, [], ["liquid", "melt", "melting", "ripple", "ripples", "waves", "wavy", "fluid"];
+    LIQSCALE = "liqscale", "\u{21b3} scale", "Psychedelic FX", 0.4, [], ["liquid scale", "ripple size", "wave size", "ripple scale"];
+    ACID = "acid", "Spectrum", "Psychedelic FX", 0.0, [], ["spectrum", "acid", "rainbow", "thermal", "false colour", "false color", "palette"];
+    ACIDCYC = "acidcyc", "\u{21b3} bands", "Psychedelic FX", 0.35, [], ["spectrum bands", "rainbow bands", "bands", "colour bands", "color bands"];
+    ACIDSPEED = "acidspeed", "\u{21b3} flow", "Psychedelic FX", 0.3, [], ["spectrum flow", "spectrum speed", "rainbow speed", "colour flow", "color flow"];
+    EDGE = "edge", "Neon edges", "Psychedelic FX", 0.0, [], ["neon edges", "edges", "neon", "outline", "outlines", "edge glow", "wireframe"];
+    RGB = "rgb", "RGB split", "Psychedelic FX", 0.1, [], ["rgb split", "rgb", "chromatic", "chromatic aberration", "colour split", "color split", "prism"];
+    POSTER = "poster", "Posterize", "Psychedelic FX", 0.0, [], ["posterize", "poster", "solarize", "cartoon", "banding"];
+    GLITCH = "glitch", "Glitch", "Psychedelic FX", 0.0, [], ["glitch", "glitches", "corruption", "datamosh"];
+    REACT = "react", "Audio react", "Psychedelic FX", 0.6, [], ["audio react", "audio reactivity", "reactivity", "reactive", "react"];
+
+    CAMMIX = "cammix", "Camera mix", "Mix", 0.6, [], ["camera mix", "webcam mix", "cam mix", "camera opacity", "camera level"];
+    VIDMIX = "vidmix", "Video mix", "Mix", 0.6, [], ["video mix", "screen mix", "capture mix", "video opacity", "video level"];
+
+    VOLUME = "volume", "Volume", "Sound", 0.7, [], ["volume", "loudness", "master", "master volume", "sound level"];
+    KEY = "key", "Key", "Sound", 0.1818, ["C", "C\u{266f}", "D", "E\u{266d}", "E", "F", "F\u{266f}", "G", "A\u{266d}", "A", "B\u{266d}", "B"], ["key", "tonic", "root note", "transpose"];
+    TEMPER = "temper", "Temperament", "Sound", 0.0, ["Werckmeister III", "Kirnberger III", "Vallotti", "Young II", "Equal"], ["temperament", "tuning", "tune"];
+    AROUTE = "aroute", "Audio FX routing", "Sound", 0.0, ["Serial", "Parallel"], ["audio routing", "sound routing", "audio fx routing", "audio signal"];
+    ORGAN = "organ", "Organ chords", "Sound", 0.55, [], ["organ", "chords", "chord", "harmony", "pad", "pipes"];
+    HARMONICS = "harmonics", "Harmonics", "Sound", 0.35, [], ["harmonics", "overtones", "brightness of sound", "timbre", "stops", "mixture"];
+    DRONE = "drone", "Bass drone", "Sound", 0.5, [], ["drone", "bass", "sub", "low end", "bass drone", "pedal"];
+    CUTOFF = "cutoff", "Filter", "Sound", 0.5, [], ["filter", "cutoff", "filter cutoff", "tone", "treble"];
+    RESONANCE = "resonance", "Resonance", "Sound", 0.3, [], ["resonance", "res"];
+    MELODY = "melody", "Melody", "Sound", 0.5, [], ["melody", "notes", "harpsichord", "sequencer", "arpeggio", "arp", "music"];
+    TEMPO = "tempo", "Tempo", "Sound", 0.3, [], ["tempo", "bpm", "beat"];
+    TEXTURE = "texture", "Ambience", "Sound", 0.6, [], ["ambience", "ambient", "ambient sound", "wind sound", "rain sound", "background sound", "weather sound"];
+    IMPACT = "impact", "Impacts", "Sound", 0.75, [], ["impacts", "impact", "thunder volume", "footsteps", "footstep", "hits", "sound effects", "sfx"];
+    REVERB = "reverb", "Reverb", "Sound", 0.6, [], ["reverb", "space", "room", "hall", "cathedral"];
+    DELAY = "delay", "Echo", "Sound", 0.3, [], ["echo", "delay", "echoes"];
+}
+
+pub const WORLD_NAME: &str = "Titan skeleton walking through sand dunes in a thunderstorm";
+
+pub fn defaults() -> [f32; NP] {
     let mut d = [0.0f32; NP];
     for (i, p) in PARAMS.iter().enumerate() {
         d[i] = p.default;
     }
-    match scene {
-        0 => {
-            d[INTENSITY] = 0.6;
-            d[FOG] = 0.45;
-            d[BLOOM] = 0.55;
-            d[TEMPO] = 0.3;
-            d[ORBIT] = 0.25;
-        }
-        1 => {
-            d[SPEED] = 0.4;
-            d[FOG] = 0.5;
-            d[BLOOM] = 0.6;
-            d[ORBIT] = 0.2;
-            d[REVERB] = 0.75;
-            d[MELODY] = 0.4;
-            d[CUTOFF] = 0.42;
-            d[WARP] = 0.25;
-        }
-        2 => {
-            d[INTENSITY] = 0.6;
-            d[DENSITY] = 0.45;
-            d[BLOOM] = 0.55;
-            d[FOG] = 0.35;
-            d[TEMPO] = 0.45;
-            d[MELODY] = 0.55;
-        }
-        _ => {
-            d[SPEED] = 0.45;
-            d[FOG] = 0.5;
-            d[ORBIT] = 0.12;
-            d[CUTOFF] = 0.4;
-            d[MELODY] = 0.3;
-            d[TEMPO] = 0.25;
-            d[WARP] = 0.05;
-        }
-    }
     d
 }
 
-pub fn find_key(key: &str) -> Option<usize> {
-    PARAMS.iter().position(|p| p.key == key)
+/// Index of the selected option of a selector parameter.
+pub fn choice(p: &[f32; NP], id: usize) -> usize {
+    let n = PARAMS[id].options.len().max(2);
+    ((p[id].clamp(0.0, 1.0) * (n - 1) as f32).round() as usize).min(n - 1)
 }
 
-/// JSON description of parameters and scenes for the UI.
+pub fn choice_value(id: usize, index: usize) -> f32 {
+    let n = PARAMS[id].options.len().max(2);
+    index.min(n - 1) as f32 / (n - 1) as f32
+}
+
+/// JSON description of the parameters for the UI.
 pub fn describe_json() -> String {
-    let mut s = String::from("{\"params\":[");
+    let mut s = String::from("{\"world\":\"");
+    s.push_str(WORLD_NAME);
+    s.push_str("\",\"params\":[");
     for (i, p) in PARAMS.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
         s.push_str(&format!(
-            "{{\"id\":{},\"key\":\"{}\",\"label\":\"{}\",\"group\":\"{}\",\"default\":{}}}",
+            "{{\"id\":{},\"key\":\"{}\",\"label\":\"{}\",\"group\":\"{}\",\"default\":{},\"options\":[",
             i, p.key, p.label, p.group, p.default
         ));
-    }
-    s.push_str("],\"scenes\":[");
-    for i in 0..NSCENES {
-        if i > 0 {
-            s.push(',');
+        for (k, o) in p.options.iter().enumerate() {
+            if k > 0 {
+                s.push(',');
+            }
+            s.push('"');
+            s.push_str(o);
+            s.push('"');
         }
-        s.push_str(&format!("{{\"id\":{},\"key\":\"{}\",\"name\":\"{}\"}}", i, SCENE_KEYS[i], SCENE_NAMES[i]));
+        s.push_str("]}");
     }
     s.push_str("]}");
     s

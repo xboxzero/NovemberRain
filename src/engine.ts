@@ -6,31 +6,24 @@ export interface ParamDef {
   label: string;
   group: string;
   default: number;
-}
-
-export interface SceneDef {
-  id: number;
-  key: string;
-  name: string;
+  /** Non-empty for selector parameters: value = index / (options.length - 1). */
+  options: string[];
 }
 
 export type ChatAction =
   | { t: 'set'; k: string; v: number }
-  | { t: 'scene'; i: number }
+  | { t: 'preset' }
   | { t: 'custom' }
   | { t: 'device'; d: 'camera' | 'mic' | 'screen' | 'file' | 'xy'; on: boolean }
-  | { t: 'youtube'; url: string }
-  | { t: 'yt'; cmd: 'off' | 'pause' | 'play' | 'mute' | 'unmute' }
-  | { t: 'ytvol'; v: number }
-  | { t: 'blend'; mode: string }
+  | { t: 'res'; v: string }
+  | { t: 'snap' }
+  | { t: 'strike' }
   | { t: 'save'; name: string }
   | { t: 'load'; name: string }
   | { t: 'delete'; name: string }
   | { t: 'export' }
   | { t: 'import' }
   | { t: 'list' }
-  | { t: 'random' }
-  | { t: 'reset' }
   | { t: 'fullscreen' }
   | { t: 'ui'; on: boolean };
 
@@ -50,8 +43,8 @@ interface Exports {
   set_param(id: number, v: number): void;
   get_param(id: number): number;
   params_ptr(): number;
-  scene_defaults_ptr(scene: number): number;
-  set_scene(scene: number): void;
+  defaults_ptr(): number;
+  strike(toTitan: number): void;
   step(dt: number, bass: number, mid: number, high: number): void;
   data_ptr(): number;
   data_len(): number;
@@ -63,15 +56,15 @@ interface Exports {
 
 export class Engine {
   readonly params: ParamDef[];
-  readonly scenes: SceneDef[];
+  readonly world: string;
   readonly byKey = new Map<string, ParamDef>();
   private enc = new TextEncoder();
   private dec = new TextDecoder();
 
   private constructor(private x: Exports, readonly wasmBytes: ArrayBuffer) {
-    const d = JSON.parse(this.str(x.describe_ptr(), x.describe_len())) as { params: ParamDef[]; scenes: SceneDef[] };
+    const d = JSON.parse(this.str(x.describe_ptr(), x.describe_len())) as { params: ParamDef[]; world: string };
     this.params = d.params;
-    this.scenes = d.scenes;
+    this.world = d.world;
     for (const p of d.params) this.byKey.set(p.key, p);
   }
 
@@ -106,19 +99,21 @@ export class Engine {
     return new Float32Array(this.x.memory.buffer, this.x.params_ptr(), this.params.length);
   }
 
-  sceneDefaults(scene: number): Float32Array {
-    return new Float32Array(this.x.memory.buffer, this.x.scene_defaults_ptr(scene), this.params.length).slice();
+  /** Parameter values of preset 1. */
+  defaults(): Float32Array {
+    return new Float32Array(this.x.memory.buffer, this.x.defaults_ptr(), this.params.length).slice();
   }
 
-  setScene(scene: number): void {
-    this.x.set_scene(scene);
+  /** Throw a lightning bolt now. */
+  strike(toTitan: boolean): void {
+    this.x.strike(toTitan ? 1 : 0);
   }
 
   step(dt: number, bass: number, mid: number, high: number): void {
     this.x.step(dt, bass, mid, high);
   }
 
-  /** Scene state for the shaders: 80 vec4. */
+  /** World state for the shader: 130 vec4. */
   data(): Float32Array {
     return new Float32Array(this.x.memory.buffer, this.x.data_ptr(), this.x.data_len());
   }
