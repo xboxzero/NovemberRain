@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#05070c" />
+    <meta name="description" content="NovemberRain: an experimental chat-driven visual and sound instrument that runs in the browser. Rust + TypeScript, WebGL2, WebAssembly." />
+    <title>NovemberRain</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2305070c'/%3E%3Cpath d='M18 3 8 18h7l-2 11 11-16h-7z' fill='%23ffb84a'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="stage">
+      <div id="yt"></div>
+      <canvas id="view"></canvas>
+    </div>
+
+    <div id="hud">
+      <header id="top">
+        <div class="brand">NOVEMBER<b>RAIN</b></div>
+        <nav id="presets" aria-label="Presets"></nav>
+        <div class="tools">
+          <span id="stat" title="Frames per second and render resolution"></span>
+          <button id="btn-chat" class="tool on" title="Chat (Enter)">Chat</button>
+          <button id="btn-panel" class="tool on" title="Controls">Controls</button>
+          <button id="btn-full" class="tool" title="Fullscreen">Full</button>
+          <button id="btn-hide" class="tool" title="Hide interface (Tab)">Hide</button>
+        </div>
+      </header>
+
+      <aside id="panel" aria-label="Controls">
+        <details open>
+          <summary>Inputs</summary>
+          <div class="grid" id="devices">
+            <button data-dev="camera">Camera</button>
+            <button data-dev="mic">Mic</button>
+            <button data-dev="screen">Screen</button>
+            <button data-dev="file">Video file</button>
+            <button data-dev="xy">XY synth pad</button>
+          </div>
+          <form id="yt-form" class="row">
+            <input id="yt-url" type="text" inputmode="url" placeholder="YouTube link or id" autocomplete="off" />
+            <button type="submit">Mix</button>
+          </form>
+          <div class="row">
+            <label for="blend">Blend</label>
+            <select id="blend">
+              <option value="screen">Screen</option>
+              <option value="lighten">Lighten</option>
+              <option value="plus-lighter">Add</option>
+              <option value="difference">Difference</option>
+              <option value="exclusion">Exclusion</option>
+              <option value="overlay">Overlay</option>
+              <option value="hard-light">Hard light</option>
+              <option value="soft-light">Soft light</option>
+              <option value="color-dodge">Dodge</option>
+              <option value="multiply">Multiply</option>
+              <option value="normal">Normal</option>
+            </select>
+            <button id="yt-off" type="button">Remove</button>
+          </div>
+        </details>
+
+        <details open>
+          <summary>Preset 5 &middot; Custom</summary>
+          <div class="row">
+            <label for="base-scene">World</label>
+            <select id="base-scene"></select>
+          </div>
+          <form id="save-form" class="row">
+            <input id="save-name" type="text" placeholder="Name this look" maxlength="60" autocomplete="off" />
+            <button type="submit">Save</button>
+          </form>
+          <ul id="saved"></ul>
+          <div class="row">
+            <button id="btn-export" type="button">Export file</button>
+            <button id="btn-import" type="button">Import file</button>
+            <button id="btn-reset" type="button">Reset</button>
+          </div>
+        </details>
+
+        <div id="sliders"></div>
+        <p class="hint">Keys A&ndash;K play notes &middot; Z/X octave &middot; 1&ndash;5 presets &middot; drag to orbit &middot; scroll or pinch to zoom &middot; Tab hides the interface</p>
+      </aside>
+
+      <section id="chat" aria-label="Chat">
+        <div id="log" aria-live="polite"></div>
+        <div id="chips"></div>
+        <form id="chat-form">
+          <input id="chat-input" type="text" placeholder="Tell me what to change…  e.g. more lightning, less fog" autocomplete="off" enterkeyhint="send" />
+          <button type="submit">Send</button>
+        </form>
+      </section>
+
+      <div id="toast" role="status"></div>
+    </div>
+
+    <button id="unhide" title="Show interface (Tab)">UI</button>
+
+    <div id="splash">
+      <div class="card">
+        <h1>NOVEMBER<b>RAIN</b></h1>
+        <p>An experimental visual + sound instrument for the browser. Four raymarched 4D worlds, a generative synthesizer, and a chat box that understands plain language.</p>
+        <p class="small">Connect your camera, microphone, screen, keyboard, mouse or touchscreen. Mix in YouTube. Save your own presets.</p>
+        <button id="start">Start with sound</button>
+        <button id="start-silent" class="ghost">Start silent</button>
+        <p id="splash-status" class="small"></p>
+      </div>
+    </div>
+
+    <input id="file-video" type="file" accept="video/*" hidden />
+    <input id="file-preset" type="file" accept=".json,application/json" hidden />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
