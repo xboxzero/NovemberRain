@@ -1,6 +1,4 @@
-// Visual inputs that become GPU textures: webcam, screen / tab capture and local video files.
-
-export type VideoKind = 'screen' | 'file' | null;
+// The camera as a sense: the organism takes its colours from what the camera sees.
 
 function makeVideo(): HTMLVideoElement {
   const v = document.createElement('video');
@@ -13,12 +11,8 @@ function makeVideo(): HTMLVideoElement {
 
 export class Media {
   readonly cam = makeVideo();
-  readonly vid = makeVideo();
   camOn = false;
-  vidKind: VideoKind = null;
   private camStream: MediaStream | null = null;
-  private vidStream: MediaStream | null = null;
-  private fileUrl: string | null = null;
   onchange: () => void = () => {};
 
   async camera(on: boolean): Promise<void> {
@@ -41,43 +35,31 @@ export class Media {
     this.onchange();
   }
 
-  stopVideo(): void {
-    this.vidStream?.getTracks().forEach((t) => t.stop());
-    this.vidStream = null;
-    this.vid.pause();
-    this.vid.srcObject = null;
-    this.vid.removeAttribute('src');
-    if (this.fileUrl) URL.revokeObjectURL(this.fileUrl);
-    this.fileUrl = null;
-    this.vidKind = null;
-    this.onchange();
-  }
+  private probe: CanvasRenderingContext2D | null = null;
 
-  /** Screen / window / tab capture. Capturing a tab that plays a video gives pixel-level mixing of any site. */
-  async screen(on: boolean): Promise<void> {
-    if (!on) {
-      if (this.vidKind === 'screen') this.stopVideo();
-      return;
+  /**
+   * Three representative colours of what the camera sees (dark, mid and bright
+   * thirds of the frame by luminance), as 9 floats in 0..1. Null until a frame is ready.
+   */
+  colours(): Float32Array | null {
+    const v = this.cam;
+    if (!this.camOn || v.readyState < 2 || !v.videoWidth) return null;
+    if (!this.probe) {
+      const c = document.createElement('canvas');
+      c.width = c.height = 16;
+      this.probe = c.getContext('2d', { willReadFrequently: true });
     }
-    if (!navigator.mediaDevices.getDisplayMedia) throw new Error('Screen capture is not supported on this device');
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-    this.stopVideo();
-    this.vidStream = stream;
-    stream.getVideoTracks()[0]?.addEventListener('ended', () => {
-      if (this.vidStream === stream) this.stopVideo();
-    });
-    this.vid.srcObject = stream;
-    await this.vid.play();
-    this.vidKind = 'screen';
-    this.onchange();
-  }
-
-  async file(f: File): Promise<void> {
-    this.stopVideo();
-    this.fileUrl = URL.createObjectURL(f);
-    this.vid.src = this.fileUrl;
-    await this.vid.play();
-    this.vidKind = 'file';
-    this.onchange();
+    if (!this.probe) return null;
+    this.probe.drawImage(v, 0, 0, 16, 16);
+    const px = this.probe.getImageData(0, 0, 16, 16).data;
+    const list: [number, number, number, number][] = [];
+    for (let i = 0; i < px.length; i += 4) list.push([px[i], px[i + 1], px[i + 2], px[i] * 0.3 + px[i + 1] * 0.59 + px[i + 2] * 0.11]);
+    list.sort((a, b) => a[3] - b[3]);
+    const out = new Float32Array(9);
+    const third = Math.floor(list.length / 3);
+    for (let k = 0; k < 3; k++) {
+      for (let i = k * third; i < (k + 1) * third; i++) for (let ch = 0; ch < 3; ch++) out[k * 3 + ch] += list[i][ch] / 255 / third;
+    }
+    return out;
   }
 }

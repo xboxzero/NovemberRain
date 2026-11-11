@@ -1,16 +1,13 @@
-// Renderer. Runs on WebGL2 or WebGL1 with the same GLSL ES 1.00 shaders, uses only
-// 8-bit render targets, and keeps every buffer at the (adaptive) internal resolution:
+// Renderer. Everything visible is dot particles: up to several million GL points
+// per frame, each computed in the vertex shader and splatted additively into a
+// floating-point density buffer, which is then developed (log tone mapping),
+// fed through a feedback loop and sharpened to the display.
 //
-//   world (raymarch + coordinate FX)  ->  scene        internal res
-//   colour FX, flame, bloom, trails   ->  feedback     internal res
-//   sharpen-upscale + grade           ->  canvas       display res
-//
-// High-resolution stills are rendered tile by tile through the same three passes
-// into small off-screen targets, so an 8K frame needs only a few megabytes of GPU memory.
+// Runs on WebGL2 or WebGL1. High-resolution stills are rendered tile by tile with
+// many passes of fresh dots per tile, so an 8K image needs only a small buffer.
 
-import { VERT } from './shaders/common';
-import { WORLD } from './shaders/world';
-import { COMPOSITE, FINAL } from './shaders/post';
+import { POINT_VERT, POINT_FRAG } from './shaders/points';
+import { VERT, DEVELOP, FINAL } from './shaders/post';
 
 export type Uniforms = Record<string, number | number[] | Float32Array>;
 type GL = WebGLRenderingContext | WebGL2RenderingContext;
@@ -18,14 +15,6 @@ type GL = WebGLRenderingContext | WebGL2RenderingContext;
 interface Program {
   prog: WebGLProgram;
   loc: Map<string, WebGLUniformLocation | null>;
-}
-
-interface Pending {
-  prog: WebGLProgram;
-  vs: WebGLShader;
-  fs: WebGLShader;
-  resolve: (p: Program) => void;
-  reject: (e: Error) => void;
 }
 
 interface Target {
@@ -36,47 +25,67 @@ interface Target {
 }
 
 export interface Frame {
-  world: Uniforms;
-  fx: Uniforms;
-  grade: Uniforms;
-  cam: HTMLVideoElement | null;
-  vid: HTMLVideoElement | null;
+  /** Uniforms of the dot shader (genome, rotations, palette). */
+  dots: Uniforms;
+  /** Dot radius relative to a 1080-line image, depth of field, brightness, glow. */
+  size: number;
+  dof: number;
+  gain: number;
+  glow: number;
+  hue: number;
+  spread: number;
+  camMix: number;
+  /** Development and feedback. */
+  tone: number[];
+  fb: number[];
+  bright: number;
+  time: number;
 }
 
 const ATTRS: WebGLContextAttributes = { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: 'high-performance' };
+const ITERS = [10, 13, 16];
 
 export class Renderer {
   gl!: GL;
   api: 'WebGL2' | 'WebGL1' = 'WebGL1';
-  /** Shader detail level actually in use: 2 full, 1 lite, 0 minimal. */
+  /** Detail level: iterations of the chaos game per dot. */
   tier = 2;
   /** Fraction of the canvas resolution used for the internal buffers. */
-  scale = 0.5;
+  scale = 0.6;
+  /** Dots drawn per frame, and the size of the seed pool. */
+  count = 200_000;
+  capacity = 0;
   maxSize = 2048;
+  maxPoint = 64;
+  hdr = false;
   lost = false;
-  private parallel: { COMPLETION_STATUS_KHR: number } | null = null;
-  private pending: Pending[] = [];
-  private world: Program | null = null;
-  private composite: Program | null = null;
+  private dots: Program | null = null;
+  private develop: Program | null = null;
   private final: Program | null = null;
-  private sceneT: Target | null = null;
+  private quad!: WebGLBuffer;
+  private seeds!: WebGLBuffer;
+  private acc: Target | null = null;
   private fb: [Target | null, Target | null] = [null, null];
   private tiles: [Target | null, Target | null, Target | null] = [null, null, null];
   private flip = 0;
-  private camTex!: WebGLTexture;
-  private vidTex!: WebGLTexture;
-  private flameTex!: WebGLTexture;
+  private frameNo = 0;
+  private floatType = 0;
+  private floatFormat = 0;
 
-  constructor(readonly canvas: HTMLCanvasElement, private forceGL1 = false) {
+  constructor(readonly canvas: HTMLCanvasElement, private forceGL1 = false, private wantCapacity = 2_000_000) {
     this.setup();
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this.lost = true;
-      this.world = this.composite = this.final = null;
+      this.dots = this.develop = this.final = null;
     });
     canvas.addEventListener('webglcontextrestored', () => {
-      this.setup();
-      void this.init(this.tier).catch((err) => console.error(err));
+      try {
+        this.setup();
+        this.init(this.tier);
+      } catch (err) {
+        console.error(err);
+      }
     });
   }
 
@@ -88,38 +97,51 @@ export class Renderer {
     this.gl = gl;
     this.api = gl2 ? 'WebGL2' : 'WebGL1';
     this.lost = false;
-    if ((gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) as number) < 128) throw new Error('this GPU exposes too few shader uniforms');
     this.maxSize = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE) as number, gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number);
-    this.parallel = gl.getExtension('KHR_parallel_shader_compile');
-    this.pending = [];
-    this.sceneT = null;
+    this.maxPoint = Math.min(256, (gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) as Float32Array)[1]);
+    this.acc = null;
     this.fb = [null, null];
     this.tiles = [null, null, null];
-    const buf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+
+    // A floating-point density buffer lets millions of faint dots add up without banding.
+    this.hdr = false;
+    if (gl2) {
+      if (gl2.getExtension('EXT_color_buffer_float') || gl2.getExtension('EXT_color_buffer_half_float')) {
+        this.floatFormat = gl2.RGBA16F;
+        this.floatType = gl2.HALF_FLOAT;
+        this.hdr = true;
+      }
+    } else {
+      const hf = gl.getExtension('OES_texture_half_float');
+      if (hf) {
+        gl.getExtension('EXT_color_buffer_half_float');
+        this.floatFormat = gl.RGBA;
+        this.floatType = hf.HALF_FLOAT_OES;
+        this.hdr = true;
+      }
+    }
+    if (this.hdr) {
+      // some drivers advertise the format but cannot render to it: test once
+      const t = this.target(null, 4, 4, true);
+      this.hdr = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      this.free(t);
+    }
+
+    this.quad = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    // The seed pool: two random 16-bit numbers per dot (4 bytes), all a dot needs to find its place.
+    this.capacity = this.wantCapacity;
+    const seeds = new Uint16Array(this.capacity * 2);
+    for (let i = 0; i < seeds.length; i += 32768) crypto.getRandomValues(seeds.subarray(i, Math.min(seeds.length, i + 32768)));
+    this.seeds = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.seeds);
+    gl.bufferData(gl.ARRAY_BUFFER, seeds, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.disable(gl.DEPTH_TEST);
-    gl.disable(gl.BLEND);
-    this.camTex = this.texture();
-    this.vidTex = this.texture();
-    this.flameTex = this.texture();
   }
 
-  private texture(): WebGLTexture {
-    const gl = this.gl;
-    const t = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return t;
-  }
-
-  private build(frag: string): Promise<Program> {
+  private build(vert: string, frag: string, attr: string): Program {
     const gl = this.gl;
     const mk = (type: number, src: string): WebGLShader => {
       const s = gl.createShader(type)!;
@@ -127,66 +149,39 @@ export class Renderer {
       gl.compileShader(s);
       return s;
     };
-    const vs = mk(gl.VERTEX_SHADER, VERT);
+    const vs = mk(gl.VERTEX_SHADER, vert);
     const fs = mk(gl.FRAGMENT_SHADER, frag);
     const prog = gl.createProgram()!;
     gl.attachShader(prog, vs);
     gl.attachShader(prog, fs);
-    gl.bindAttribLocation(prog, 0, 'aPos');
+    gl.bindAttribLocation(prog, 0, attr);
     gl.linkProgram(prog);
-    return new Promise<Program>((resolve, reject) => {
-      this.pending.push({ prog, vs, fs, resolve, reject });
-      if (!this.parallel) this.poll();
-    });
-  }
-
-  /** Finish any shader builds that are ready. Non-blocking when the driver compiles in parallel. */
-  poll(): void {
-    const gl = this.gl;
-    if (!this.pending.length) return;
-    this.pending = this.pending.filter((p) => {
-      if (this.parallel && !gl.getProgramParameter(p.prog, this.parallel.COMPLETION_STATUS_KHR)) return true;
-      if (gl.getProgramParameter(p.prog, gl.LINK_STATUS)) {
-        p.resolve({ prog: p.prog, loc: new Map() });
-      } else {
-        const log = gl.getShaderInfoLog(p.fs) || gl.getShaderInfoLog(p.vs) || gl.getProgramInfoLog(p.prog) || 'unknown error';
-        p.reject(new Error(`shader failed to compile: ${log}`));
-      }
-      gl.deleteShader(p.vs);
-      gl.deleteShader(p.fs);
-      return false;
-    });
-  }
-
-  private async buildWorld(tier: number): Promise<void> {
-    // Walk down the detail tiers until one compiles on this GPU.
-    for (let t = tier; t >= 0; t--) {
-      try {
-        const p = await this.build(`#define TIER ${t}\n${WORLD}`);
-        if (this.world) this.gl.deleteProgram(this.world.prog);
-        this.world = p;
-        this.tier = t;
-        return;
-      } catch (e) {
-        console.warn(`world shader tier ${t} unavailable`, e);
-        if (t === 0) throw e;
-      }
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      const log = gl.getShaderInfoLog(vs) || gl.getShaderInfoLog(fs) || gl.getProgramInfoLog(prog) || 'unknown error';
+      throw new Error(`shader failed to compile: ${log}`);
     }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return { prog, loc: new Map() };
   }
 
-  /** Compile everything. Resolves when the world can be drawn. */
-  async init(tier: number): Promise<void> {
-    [this.composite, this.final] = await Promise.all([this.build(COMPOSITE), this.build(FINAL)]);
-    await this.buildWorld(tier);
+  /** Compile the shaders (they are small, so this is quick). */
+  init(tier: number): void {
+    this.develop = this.build(VERT, DEVELOP, 'aPos');
+    this.final = this.build(VERT, FINAL, 'aPos');
+    this.setTier(tier);
   }
 
-  /** Switch to another detail tier; the current one keeps drawing until the new one is ready. */
-  async setTier(tier: number): Promise<void> {
-    await this.buildWorld(Math.max(0, Math.min(2, tier)));
+  setTier(tier: number): void {
+    const t = Math.max(0, Math.min(2, tier));
+    const p = this.build(`#define ITER ${ITERS[t]}\n${POINT_VERT}`, POINT_FRAG, 'aSeed');
+    if (this.dots) this.gl.deleteProgram(this.dots.prog);
+    this.dots = p;
+    this.tier = t;
   }
 
   get ready(): boolean {
-    return !this.lost && !!this.world && !!this.composite && !!this.final;
+    return !this.lost && !!this.dots && !!this.develop && !!this.final;
   }
 
   private u(p: Program, name: string): WebGLUniformLocation | null {
@@ -205,22 +200,29 @@ export class Renderer {
       const loc = this.u(p, name);
       if (!loc) continue;
       if (typeof v === 'number') gl.uniform1f(loc, v);
-      else if (name === 'uD' || v.length === 4) gl.uniform4fv(loc, v);
-      else if (v.length === 3) gl.uniform3fv(loc, v);
-      else gl.uniform2fv(loc, v);
+      else if (name === 'uA' || name === 'uRot4' || name === 'uView') gl.uniformMatrix4fv(loc, false, v);
+      else if (name === 'uPal' || name === 'uCam') gl.uniform3fv(loc, v);
+      else gl.uniform4fv(loc, v);
     }
   }
 
-  private target(old: Target | null, w: number, h: number): Target {
+  private target(old: Target | null, w: number, h: number, float = false): Target {
     const gl = this.gl;
     if (old && old.w === w && old.h === h) return old;
     this.free(old);
-    const tex = this.texture();
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if (float) gl.texImage2D(gl.TEXTURE_2D, 0, this.floatFormat, w, h, 0, gl.RGBA, this.floatType, null);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const filter = float ? gl.NEAREST : gl.LINEAR;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     const fbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    gl.clearColor(0, 0, 0, 1);
+    gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     return { fbo, tex, w, h };
   }
@@ -245,9 +247,47 @@ export class Renderer {
     return true;
   }
 
-  /** Internal buffer size for the current canvas and scale. */
   get internal(): [number, number] {
     return [Math.max(2, Math.round(this.canvas.width * this.scale)), Math.max(2, Math.round(this.canvas.height * this.scale))];
+  }
+
+  /**
+   * Splat dots into `dst`. (W, H) is the full image the dots are sized for; the
+   * window [cx, cy, ihw, ihh] selects which part of it this buffer shows.
+   */
+  private splat(f: Frame, dst: Target, W: number, H: number, win: [number, number, number, number], count: number, passes: number): void {
+    const gl = this.gl;
+    const p = this.dots!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.viewport(0, 0, dst.w, dst.h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(p.prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.seeds);
+    gl.vertexAttribPointer(0, 2, gl.UNSIGNED_SHORT, true, 0, 0);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    this.apply(p, f.dots);
+    const sym = f.dots.uSym as number[];
+    const proj = f.dots.uProj as number[];
+    gl.uniform4f(this.u(p, 'uProj'), proj[0], proj[1], proj[2], W / H);
+    gl.uniform4f(this.u(p, 'uTile'), win[0], win[1], win[2], win[3]);
+    // Each dot carries the same share of light whatever the resolution or the dot count.
+    const total = count * passes;
+    let energy = ((f.gain * W * H) / total) * 0.7;
+    if (!this.hdr) energy = Math.max(energy, 0.012); // 8-bit buffer: a dot must register at all
+    gl.uniform4f(this.u(p, 'uDot'), (f.size * H) / 1080, f.dof, energy, f.glow);
+    gl.uniform4f(this.u(p, 'uCol'), f.hue, f.spread, f.camMix, this.maxPoint);
+    for (let i = 0; i < passes; i++) {
+      // a different seed offset every pass and every frame: the dots never repeat,
+      // so time (trails) and passes (stills) keep adding new detail
+      const k = this.frameNo++;
+      gl.uniform4f(this.u(p, 'uSym'), sym[0], sym[1], (k * 0.61803398875) % 1, (k * 0.7548776662) % 1);
+      gl.drawArrays(gl.POINTS, 0, Math.min(count, this.capacity));
+    }
+    gl.disable(gl.BLEND);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
   }
 
   private bind(unit: number, tex: WebGLTexture): void {
@@ -255,139 +295,83 @@ export class Renderer {
     this.gl.bindTexture(this.gl.TEXTURE_2D, tex);
   }
 
-  private video(tex: WebGLTexture, v: HTMLVideoElement | null, unit: number): void {
+  private developPass(f: Frame, src: Target, prev: Target | null, dst: Target, asp: number): void {
     const gl = this.gl;
-    this.bind(unit, tex);
-    if (v && v.readyState >= 2 && v.videoWidth > 0) {
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-      try {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v);
-      } catch {
-        /* frame not available yet */
-      }
-      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    }
+    const d = this.develop!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.viewport(0, 0, dst.w, dst.h);
+    gl.useProgram(d.prog);
+    this.bind(0, src.tex);
+    this.bind(1, (prev ?? src).tex);
+    gl.uniform1i(this.u(d, 'uAcc'), 0);
+    gl.uniform1i(this.u(d, 'uPrev'), 1);
+    gl.uniform4f(this.u(d, 'uTone'), f.tone[0], f.tone[1], f.tone[2], this.hdr ? 0 : 1);
+    gl.uniform4f(this.u(d, 'uFb'), prev ? f.fb[0] : 0, f.fb[1], f.fb[2], f.fb[3]);
+    gl.uniform1f(this.u(d, 'uAsp'), asp);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  /** Upload the fractal flame image produced by the Rust chaos game. */
-  setFlame(pixels: Uint8Array, size: number): void {
+  private finalPass(f: Frame, src: Target, dst: Target | null, w: number, h: number, crop: number[], tile: number[], W: number, H: number, sharp: number): void {
     const gl = this.gl;
-    if (this.lost) return;
-    this.bind(4, this.flameTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-  }
-
-  private pass(p: Program, dst: Target | null, w: number, h: number): void {
-    const gl = this.gl;
+    const fin = this.final!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, dst ? dst.fbo : null);
     gl.viewport(0, 0, w, h);
-    gl.useProgram(p.prog);
-  }
-
-  private compositeInputs(c: Program, scene: Target, low: Target, prev: Target, f: Frame): void {
-    const gl = this.gl;
-    this.bind(0, scene.tex);
-    this.bind(1, low.tex);
-    this.bind(2, prev.tex);
-    this.video(this.camTex, f.cam, 3);
-    this.bind(4, this.flameTex);
-    this.video(this.vidTex, f.vid, 5);
-    gl.uniform1i(this.u(c, 'uScene'), 0);
-    gl.uniform1i(this.u(c, 'uLow'), 1);
-    gl.uniform1i(this.u(c, 'uPrev'), 2);
-    gl.uniform1i(this.u(c, 'uCam'), 3);
-    gl.uniform1i(this.u(c, 'uFlame'), 4);
-    gl.uniform1i(this.u(c, 'uVid'), 5);
-    gl.uniform2f(this.u(c, 'uTexel'), 1 / scene.w, 1 / scene.h);
-    this.apply(c, f.fx);
+    gl.useProgram(fin.prog);
+    this.bind(0, src.tex);
+    gl.uniform1i(this.u(fin, 'uTex'), 0);
+    gl.uniform2f(this.u(fin, 'uTexel'), 1 / src.w, 1 / src.h);
+    gl.uniform4f(this.u(fin, 'uCrop'), crop[0], crop[1], crop[2], crop[3]);
+    gl.uniform4f(this.u(fin, 'uTile'), tile[0], tile[1], tile[2], tile[3]);
+    gl.uniform2f(this.u(fin, 'uOut'), W, H);
+    gl.uniform1f(this.u(fin, 'uTime'), f.time);
+    gl.uniform1f(this.u(fin, 'uSharp'), sharp);
+    gl.uniform1f(this.u(fin, 'uBright'), f.bright);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
   /** Draw one live frame to the canvas. */
   render(f: Frame): void {
-    this.poll();
     if (!this.ready) return;
-    const gl = this.gl;
-    const world = this.world!;
-    const c = this.composite!;
-    const fin = this.final!;
     const W = this.canvas.width;
     const H = this.canvas.height;
     const [sw, sh] = this.internal;
-    this.sceneT = this.target(this.sceneT, sw, sh);
+    this.acc = this.target(this.acc, sw, sh, this.hdr);
     this.fb[0] = this.target(this.fb[0], sw, sh);
     this.fb[1] = this.target(this.fb[1], sw, sh);
-
-    this.pass(world, this.sceneT, sw, sh);
-    gl.uniform2f(this.u(world, 'uRes'), sw, sh);
-    gl.uniform2f(this.u(world, 'uOrigin'), 0, 0);
-    this.apply(world, f.world);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
+    this.splat(f, this.acc, sw, sh, [0, 0, 1, 1], this.count, 1);
     const dst = this.fb[this.flip]!;
-    this.pass(c, dst, sw, sh);
-    this.compositeInputs(c, this.sceneT, this.sceneT, this.fb[1 - this.flip]!, f);
-    gl.uniform4f(this.u(c, 'uTile'), 0, 0, 1, 1);
-    gl.uniform1f(this.u(c, 'uAsp'), W / H);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    this.pass(fin, null, W, H);
-    this.bind(0, dst.tex);
-    gl.uniform1i(this.u(fin, 'uTex'), 0);
-    gl.uniform2f(this.u(fin, 'uTexel'), 1 / sw, 1 / sh);
-    gl.uniform4f(this.u(fin, 'uCrop'), 0, 0, 1, 1);
-    gl.uniform4f(this.u(fin, 'uTile'), 0, 0, 1, 1);
-    gl.uniform2f(this.u(fin, 'uOut'), W, H);
-    // the more the image is stretched, the more sharpening it gets
-    gl.uniform1f(this.u(fin, 'uSharp'), Math.min(0.9, 0.12 + (1 - this.scale) * 1.1));
-    this.apply(fin, f.grade);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.developPass(f, this.acc, this.fb[1 - this.flip]!, dst, W / H);
+    this.finalPass(f, dst, null, W, H, [0, 0, 1, 1], [0, 0, 1, 1], W, H, Math.min(0.8, 0.1 + (1 - this.scale)));
     this.flip = 1 - this.flip;
   }
 
   /**
-   * Render one tile of a W x H still. (ox, oy) is the tile's bottom-left corner in
-   * image pixels (GL orientation), `size` its edge, (w, h) the part actually needed.
-   * Returns w*h RGBA pixels, bottom row first. Must follow a `render()` of the same frame.
+   * Render one tile of a W x H still: `passes` rounds of fresh dots are accumulated,
+   * developed and read back. (ox, oy) is the tile's bottom-left corner in image pixels
+   * (GL orientation), `size` its edge, (w, h) the part needed. `out` receives w*h RGBA
+   * pixels, bottom row first.
    */
-  tile(f: Frame, W: number, H: number, ox: number, oy: number, size: number, w: number, h: number, out: Uint8Array): void {
+  tile(f: Frame, W: number, H: number, ox: number, oy: number, size: number, w: number, h: number, passes: number, out: Uint8Array): void {
     const gl = this.gl;
-    const world = this.world!;
-    const c = this.composite!;
-    const fin = this.final!;
-    const M = 8; // overlap so edge detection and filtering never see a tile border
+    // guard band: a splat centred just outside the tile must still paint its share inside
+    const M = Math.min(96, Math.ceil(this.maxPoint / 2) + 2);
     const S = size + 2 * M;
-    this.tiles[0] = this.target(this.tiles[0], S, S);
+    this.tiles[0] = this.target(this.tiles[0], S, S, this.hdr);
     this.tiles[1] = this.target(this.tiles[1], S, S);
     this.tiles[2] = this.target(this.tiles[2], size, size);
     const [a, b, d] = this.tiles as [Target, Target, Target];
-    const live = this.fb[1 - this.flip]!; // the frame currently on screen
-
-    this.pass(world, a, S, S);
-    gl.uniform2f(this.u(world, 'uRes'), W, H);
-    gl.uniform2f(this.u(world, 'uOrigin'), ox - M, oy - M);
-    this.apply(world, f.world);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    this.pass(c, b, S, S);
-    this.compositeInputs(c, a, this.sceneT!, live, f);
-    gl.uniform4f(this.u(c, 'uTile'), (ox - M) / W, (oy - M) / H, S / W, S / H);
-    gl.uniform1f(this.u(c, 'uAsp'), W / H);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    this.pass(fin, d, size, size);
-    this.bind(0, b.tex);
-    gl.uniform1i(this.u(fin, 'uTex'), 0);
-    gl.uniform2f(this.u(fin, 'uTexel'), 1 / S, 1 / S);
-    gl.uniform4f(this.u(fin, 'uCrop'), M / S, M / S, size / S, size / S);
-    gl.uniform4f(this.u(fin, 'uTile'), ox / W, oy / H, size / W, size / H);
-    gl.uniform2f(this.u(fin, 'uOut'), W, H);
-    gl.uniform1f(this.u(fin, 'uSharp'), 0);
-    this.apply(fin, f.grade);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const x0 = ((ox - M) / W) * 2 - 1;
+    const y0 = ((oy - M) / H) * 2 - 1;
+    const hw = S / W;
+    const hh = S / H;
+    // every tile draws the whole swarm (only the dots that land in it show), so the
+    // energy per dot is the same in every tile and the tiles join without seams
+    this.splat(f, a, W, H, [x0 + hw, y0 + hh, 1 / hw, 1 / hh], this.count, passes);
+    this.developPass(f, a, null, b, W / H);
+    this.finalPass(f, b, d, size, size, [M / S, M / S, size / S, size / S], [ox / W, oy / H, size / W, size / H], W, H, 0);
     gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, out);
   }
 
-  /** Release the tile targets after a still. */
   freeTiles(): void {
     for (const t of this.tiles) this.free(t);
     this.tiles = [null, null, null];

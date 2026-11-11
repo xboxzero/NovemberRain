@@ -3,6 +3,7 @@ import { Engine } from './engine';
 import { Renderer, type Frame } from './gl';
 import { AudioEngine } from './audio';
 import { Media } from './media';
+import { EarthFeed } from './feeds';
 import { PresetStore, exportPreset, importPreset, type Preset } from './presets';
 import { PngStream } from './png';
 
@@ -10,25 +11,45 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getEl
 const clamp = (v: number, a = 0, b = 1): number => Math.min(b, Math.max(a, v));
 
 const NOTE_KEYS: Record<string, number> = {
-  KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13, KeyL: 14,
+  KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13,
 };
-/** Internal pixel budget per shader tier (megapixels) and quality mode. */
-const BUDGET = { auto: [0.5, 1.1, 2.4], eco: [0.2, 0.3, 0.45], balanced: [0.45, 0.9, 1.6], sharp: [99, 99, 99] } as const;
-type Quality = keyof typeof BUDGET;
-const FLAME_ITERS = [30_000, 60_000, 110_000];
-const TILE = 512;
+type Quality = 'auto' | 'eco' | 'sharp';
+const TILE = 1024;
+// genome layout (see engine/src/evo.rs)
+const MAP_LEN = 26;
+const G_SYM = 104;
+const G_PAL = 106;
+const G_ROT = 118;
+const G_PERSP = 121;
+
+/** Column-major 4x4 rotation in the plane of axes (i, j), multiplied into `m`. */
+function rotate4(m: Float32Array, i: number, j: number, a: number): void {
+  const s = Math.sin(a);
+  const c = Math.cos(a);
+  for (let r = 0; r < 4; r++) {
+    const x = m[i * 4 + r];
+    const y = m[j * 4 + r];
+    m[i * 4 + r] = x * c + y * s;
+    m[j * 4 + r] = -x * s + y * c;
+  }
+}
+const identity = (): Float32Array => new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
 async function boot(): Promise<void> {
   const splashStatus = $('splash-status');
   const canvas = $<HTMLCanvasElement>('view');
   const query = new URLSearchParams(location.search);
   const mobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 760;
+  // The seed pool is the upper bound of dots per frame: 4 bytes per dot.
+  const capacity = Number(query.get('dots')) || (mobile ? 700_000 : 3_000_000);
   let renderer: Renderer;
   let engine: Engine;
   try {
-    renderer = new Renderer(canvas, query.get('gl') === '1');
+    renderer = new Renderer(canvas, query.get('gl') === '1', capacity);
+    renderer.init(query.has('tier') ? Number(query.get('tier')) : mobile || renderer.api === 'WebGL1' ? 1 : 2);
     engine = await Engine.load(`${import.meta.env.BASE_URL}engine.wasm`);
   } catch (e) {
+    console.error(e);
     splashStatus.textContent = `Cannot start: ${(e as Error).message}`;
     $<HTMLButtonElement>('start').disabled = true;
     $<HTMLButtonElement>('start-silent').disabled = true;
@@ -37,17 +58,18 @@ async function boot(): Promise<void> {
 
   const audio = new AudioEngine();
   const media = new Media();
+  const earth = new EarthFeed();
   const store = new PresetStore();
   const P = (key: string): number => engine.id(key);
   const val = (key: string): number => engine.getParam(P(key));
 
-  let activePreset = 0;
-  let yaw = 0.25;
-  let orbitPhase = 0;
-  let xyOn = false;
-  let octave = 0;
+  let yaw = 0.4;
+  let pitch = 0.25;
   let quality: Quality = 'auto';
   let busy = false;
+  let octave = 0;
+  let tiltOn = false;
+  const tilt = [0, 0];
 
   // ------------------------------------------------------------------ feedback
   const toastEl = $('toast');
@@ -59,7 +81,7 @@ async function boot(): Promise<void> {
     toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), ms);
   };
 
-  // ------------------------------------------------------------------ parameters
+  // ------------------------------------------------------------------ controls
   const controls = new Map<number, (v: number) => void>();
   const setParam = (id: number, v: number, fromControl = false): void => {
     v = clamp(v);
@@ -74,7 +96,7 @@ async function boot(): Promise<void> {
   {
     const host = $('sliders');
     const groups = new Map<string, HTMLDetailsElement>();
-    const openGroups = new Set(mobile ? ['World'] : ['World', 'Camera', 'Psychedelic FX']);
+    const openGroups = new Set(mobile ? ['Life'] : ['Life', 'Space', 'Dots', 'Colour']);
     for (const p of engine.params) {
       let g = groups.get(p.group);
       if (!g) {
@@ -93,7 +115,6 @@ async function boot(): Promise<void> {
       label.htmlFor = `p-${p.key}`;
       row.appendChild(label);
       if (p.options.length) {
-        // Selector parameter (routing, key, temperament).
         const sel = document.createElement('select');
         sel.id = `p-${p.key}`;
         p.options.forEach((o, i) => sel.add(new Option(o, String(i))));
@@ -122,32 +143,47 @@ async function boot(): Promise<void> {
       g.appendChild(row);
     }
   }
+  setAll(engine.defaults());
 
-  // ------------------------------------------------------------------ presets
-  const presetBar = $('presets');
-  const presetButtons: HTMLButtonElement[] = [];
-  const markPreset = (): void => presetButtons.forEach((b, i) => b.classList.toggle('on', i === activePreset));
+  // ------------------------------------------------------------------ evolution buttons
+  const genome = new Float32Array(engine.genomeLength);
+  const loveBtn = $('btn-love');
+  const love = (): void => {
+    engine.love();
+    loveBtn.classList.add('on');
+    toast('Loved: this form stays in the gene pool and will breed');
+  };
+  const next = (): void => {
+    engine.skip();
+    loveBtn.classList.remove('on');
+  };
+  const newLife = (): void => {
+    engine.reseed();
+    loveBtn.classList.remove('on');
+    toast('A fresh gene pool');
+  };
+  loveBtn.addEventListener('click', love);
+  $('btn-next').addEventListener('click', next);
+  $('btn-new').addEventListener('click', newLife);
 
-  const currentPreset = (name: string): Preset => {
+  // ------------------------------------------------------------------ saved organisms
+  const current = (name: string): Preset => {
     const params: Record<string, number> = {};
     const v = engine.values();
     for (const p of engine.params) params[p.key] = Math.round(v[p.id] * 10000) / 10000;
-    return { app: 'novemberrain', v: 1, name, params };
+    return { app: 'novemberrain', v: 1, name, params, genome: Array.from(genome, (x) => Math.round(x * 1e5) / 1e5) };
   };
-
   const applyPreset = (p: Preset): void => {
-    const values = engine.defaults();
+    const values = engine.values();
     for (const [k, v] of Object.entries(p.params)) {
       const def = engine.byKey.get(k);
       if (def) values[def.id] = v;
     }
     setAll(values);
-    activePreset = 1;
-    markPreset();
-    store.last = p.name;
+    if (p.genome.length === engine.genomeLength) engine.adopt(p.genome);
     $<HTMLInputElement>('save-name').value = p.name;
+    loveBtn.classList.add('on');
   };
-
   const savedList = $('saved');
   const renderSaved = (): void => {
     savedList.replaceChildren();
@@ -155,7 +191,7 @@ async function boot(): Promise<void> {
     if (!all.length) {
       const li = document.createElement('li');
       li.className = 'empty';
-      li.textContent = 'Nothing saved yet. Shape the world, name it, press Save.';
+      li.textContent = 'Nothing kept yet. When a form is worth keeping, name it and press Save.';
       savedList.appendChild(li);
     }
     for (const p of all) {
@@ -176,56 +212,17 @@ async function boot(): Promise<void> {
       savedList.appendChild(li);
     }
   };
-
-  const loadDefault = (): void => {
-    setAll(engine.defaults());
-    activePreset = 0;
-    markPreset();
-    yaw = 0.25;
-    orbitPhase = 0;
-  };
-
-  const loadCustom = (): void => {
-    const last = (store.last ? store.get(store.last) : undefined) ?? store.list()[0];
-    $('panel').hidden = false;
-    $('btn-panel').classList.add('on');
-    if (last) {
-      applyPreset(last);
-      toast(`Custom preset: ${last.name}`);
-    } else {
-      activePreset = 1;
-      markPreset();
-      toast('Preset 2 is yours: shape the world, then press Save (or import a file)');
-    }
-  };
-
-  for (const [i, label, title, fn] of [
-    [1, 'Titan Storm', engine.world, loadDefault],
-    [2, 'Custom', 'Your own saved preset', loadCustom],
-  ] as const) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.title = title;
-    b.innerHTML = `<i>${i}</i>`;
-    b.append(label);
-    b.addEventListener('click', fn);
-    presetBar.appendChild(b);
-    presetButtons.push(b);
-  }
-
   $<HTMLFormElement>('save-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    const n = $<HTMLInputElement>('save-name').value.trim() || 'Custom';
-    store.save(currentPreset(n));
+    const n = $<HTMLInputElement>('save-name').value.trim() || `Organism ${store.list().length + 1}`;
+    store.save(current(n));
     $<HTMLInputElement>('save-name').value = n;
-    activePreset = 1;
-    markPreset();
     renderSaved();
     toast(`Saved "${n}"`);
   });
-  $('btn-export').addEventListener('click', () => exportPreset(currentPreset($<HTMLInputElement>('save-name').value.trim() || 'Custom')));
+  $('btn-export').addEventListener('click', () => exportPreset(current($<HTMLInputElement>('save-name').value.trim() || 'Organism')));
   $('btn-import').addEventListener('click', () => $<HTMLInputElement>('file-preset').click());
-  $('btn-reset').addEventListener('click', loadDefault);
+  $('btn-reset').addEventListener('click', () => setAll(engine.defaults()));
   $<HTMLInputElement>('file-preset').addEventListener('change', (e) => {
     const f = (e.target as HTMLInputElement).files?.[0];
     (e.target as HTMLInputElement).value = '';
@@ -240,44 +237,46 @@ async function boot(): Promise<void> {
       .catch((err: Error) => toast(err.message));
   });
 
-  // ------------------------------------------------------------------ devices
+  // ------------------------------------------------------------------ senses
   const devButtons = [...document.querySelectorAll<HTMLButtonElement>('#devices button')];
   const refreshDevices = (): void => {
     for (const b of devButtons) {
       const d = b.dataset.dev;
-      b.classList.toggle('on', d === 'camera' ? media.camOn : d === 'mic' ? audio.micOn : d === 'screen' ? media.vidKind === 'screen' : d === 'file' ? media.vidKind === 'file' : xyOn);
+      b.classList.toggle('on', d === 'camera' ? media.camOn : d === 'mic' ? audio.micOn : d === 'tilt' ? tiltOn : earth.on);
     }
   };
   media.onchange = refreshDevices;
-
+  const onTilt = (e: DeviceOrientationEvent): void => {
+    tilt[0] = ((e.gamma ?? 0) / 90) * 1.6;
+    tilt[1] = (((e.beta ?? 0) - 45) / 90) * 1.6;
+  };
   const device = async (d: string, on: boolean): Promise<void> => {
     try {
       if (d === 'camera') await media.camera(on);
       else if (d === 'mic') await audio.mic(on);
-      else if (d === 'screen') await media.screen(on);
-      else if (d === 'file') {
-        if (on) $<HTMLInputElement>('file-video').click();
-        else if (media.vidKind === 'file') media.stopVideo();
-      } else if (d === 'xy') {
-        xyOn = on;
-        if (!on) audio.post({ t: 'xy', x: 0.5, y: 0.5, d: false });
-        toast(on ? 'XY pad on: drag on the picture to play (left-right pitch, up-down filter)' : 'XY pad off: drag moves the camera');
+      else if (d === 'earth') {
+        if (on) earth.start();
+        else earth.stop();
+      } else if (d === 'tilt') {
+        if (on) {
+          const DOE = DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> };
+          if (typeof DOE.requestPermission === 'function' && (await DOE.requestPermission()) !== 'granted') throw Object.assign(new Error('denied'), { name: 'NotAllowedError' });
+          window.addEventListener('deviceorientation', onTilt);
+          toast('Tilt the device to turn the form through the 4th dimension');
+        } else {
+          window.removeEventListener('deviceorientation', onTilt);
+          tilt[0] = tilt[1] = 0;
+        }
+        tiltOn = on;
       }
     } catch (e) {
       const err = e as Error;
       const denied = err.name === 'NotAllowedError' || err.name === 'SecurityError';
-      toast(denied ? `Permission to use the ${d} was not given. Allow it in the browser's site settings.` : `Could not start the ${d}: ${err.message}`, 5000);
+      toast(denied ? `Permission for ${d} was not given. Allow it in the browser's site settings.` : `Could not start ${d}: ${err.message}`, 5000);
     }
     refreshDevices();
   };
-  for (const b of devButtons) {
-    b.addEventListener('click', () => void device(b.dataset.dev!, !b.classList.contains('on')));
-  }
-  $<HTMLInputElement>('file-video').addEventListener('change', (e) => {
-    const f = (e.target as HTMLInputElement).files?.[0];
-    if (f) media.file(f).catch((err: Error) => toast(`Could not play that file: ${err.message}`, 5000));
-    (e.target as HTMLInputElement).value = '';
-  });
+  for (const b of devButtons) b.addEventListener('click', () => void device(b.dataset.dev!, !b.classList.contains('on')));
 
   // ------------------------------------------------------------------ interface chrome
   const setUi = (on: boolean): void => {
@@ -295,138 +294,187 @@ async function boot(): Promise<void> {
   $('btn-full').addEventListener('click', fullscreen);
   $('btn-hide').addEventListener('click', () => setUi(false));
   $('unhide').addEventListener('click', () => setUi(true));
-  $('btn-strike').addEventListener('click', () => engine.strike(true));
   if (mobile) $('btn-panel').click();
-  const qualitySelect = $<HTMLSelectElement>('quality');
-  qualitySelect.addEventListener('change', () => {
-    quality = qualitySelect.value as Quality;
+  $<HTMLSelectElement>('quality').addEventListener('change', (e) => {
+    quality = (e.target as HTMLSelectElement).value as Quality;
   });
 
   // ------------------------------------------------------------------ frame assembly
-  const stat = $('stat');
-  const data = new Float32Array(336);
   const pointers = new Map<number, { x: number; y: number }>();
-  let flameDt = 0;
-  let flameTick = 0;
+  const rot4 = identity();
+  const view = identity();
+  const angle4 = [0, 0, 0];
+  const camCols = new Float32Array([0.9, 0.3, 0.2, 0.2, 0.8, 0.6, 0.3, 0.4, 1.0]);
+  const uB = new Float32Array(16);
+  const uV = new Float32Array(16);
+  const uCP = new Float32Array(16);
+  const uA = new Float32Array(64);
+  const uPal = new Float32Array(12);
+  let spin = 0;
+  let hueClock = 0;
+  let camTimer = 0;
+  let quakeTimer = 4;
+  let pulse = 0;
+  let lastGeneration = 0;
 
-  /** Advance the world by `dt` seconds and describe the frame to draw. */
+  /** Advance the organism by `dt` seconds and describe the frame to draw. */
   const compose = (now: number, dt: number): Frame => {
     audio.update();
     const react = val('react') * 1.6;
     const bass = clamp(audio.bands.bass * react);
     const mid = clamp(audio.bands.mid * react);
     const high = clamp(audio.bands.high * react);
-    engine.step(dt, bass, mid, high);
-    const ev = engine.events();
-    for (let i = 0; i < ev.length; i += 4) audio.post({ t: 'ev', k: ev[i], a: ev[i + 1], b: ev[i + 2] });
-    data.set(engine.data());
 
-    const flame = val('flame');
-    // The chaos game runs every frame on the full tier, every other frame below it.
-    flameDt += dt;
-    if (flame > 0.003 && dt > 0 && (renderer.tier === 2 || ++flameTick % 2 === 0)) {
-      const f = engine.flame(FLAME_ITERS[renderer.tier], flameDt, bass);
-      renderer.setFlame(f.pixels, f.size);
-      flameDt = 0;
+    // Impulses from the world: a loud beat or an earthquake make the next generation mutate harder.
+    let kick = audio.micOn && bass > 0.75 ? dt * 0.6 : 0;
+    quakeTimer -= dt;
+    if (earth.on && quakeTimer <= 0) {
+      const q = earth.next();
+      quakeTimer = q ? 9 : 3;
+      if (q) {
+        const strength = clamp((q.mag + 1) / 8) * val('earth');
+        kick += strength;
+        pulse = Math.max(pulse, strength);
+      }
+    }
+    pulse *= Math.exp(-dt * 1.2);
+
+    genome.set(engine.evolve(dt, clamp(kick)));
+    const info = engine.info();
+    if (info.born) {
+      loveBtn.classList.remove('on');
+      // every birth rings a note chosen by the newborn's genes
+      if (info.generation !== lastGeneration) audio.post({ t: 'on', n: Math.round(Math.abs(genome[24]) * 12), v: 0.5 });
+      window.setTimeout(() => audio.post({ t: 'off', n: Math.round(Math.abs(genome[24]) * 12) }), 900);
+      lastGeneration = info.generation;
     }
 
-    // Architectural camera: it stands on the sand at eye height, the film plane stays
-    // vertical and the lens is shifted (not tilted) to take in the whole titan.
-    if (!pointers.size || xyOn) orbitPhase += dt * val('orbit') * 0.5;
-    const y = yaw + Math.sin(orbitPhase) * 0.9;
-    const dist = data[335] * (0.35 + 1.4 * val('zoom'));
-    const tx = data[332];
-    const ty = data[333];
-    const tz = data[334];
-    const cx = tx + dist * Math.sin(y);
-    const cz = tz + dist * Math.cos(y);
-    const eye = val('eye');
-    const shake = data[72] * 0.5;
-    const cy = engine.ground(cx, cz) + 1.3 + eye * eye * 70 + Math.cos(now * 0.043) * shake;
-    const fx = (tx - cx) / dist;
-    const fz = (tz - cz) / dist;
-    const lens = val('lens');
-    const focal = 0.8 + Math.pow(lens, 1.5) * 4.2;
-    const rise = ((ty - cy) / dist) * focal + (val('shift') - 0.5) * 1.6;
-    const time = now / 1000;
-    const au = [bass, mid, high, (bass + mid + high) / 3];
+    // genome -> uniforms
+    let total = 0;
+    for (let m = 0; m < 4; m++) total += genome[m * MAP_LEN + 25];
+    let accP = 0;
+    for (let m = 0; m < 4; m++) {
+      const o = m * MAP_LEN;
+      uA.set(genome.subarray(o, o + 16), m * 16);
+      uB.set(genome.subarray(o + 16, o + 20), m * 4);
+      uV.set(genome.subarray(o + 20, o + 24), m * 4);
+      accP += genome[o + 25] / total;
+      uCP[m * 4] = genome[o + 24];
+      uCP[m * 4 + 1] = m === 3 ? 2 : accP;
+    }
+    uPal.set(genome.subarray(G_PAL, G_PAL + 12));
+    const psy = val('psy');
+    const windy = earth.on ? earth.wind * val('earth') : 0;
+    // psychedelia multiplies how many colour bands wrap around the form
+    for (let k = 6; k < 9; k++) uPal[k] *= 0.6 + psy * 2.4;
+    if (earth.on) {
+      // warm air reddens the palette, cold air blues it
+      const w = (earth.warmth - 0.5) * 0.25 * val('earth');
+      uPal[0] += w;
+      uPal[2] -= w;
+    }
+    const symSel = Math.round(val('symmetry') * 8);
+    const sym = symSel > 0 ? symSel : genome[G_SYM];
+
+    // rotation in the three planes that involve the 4th axis: evolved speeds, the slider, wind and tilt
+    const dim = val('dim');
+    const rate = dim * dim * 1.6 * (1 + windy * 2 + mid);
+    for (let k = 0; k < 3; k++) angle4[k] += dt * rate * (0.25 + 0.5 * genome[G_ROT + k]);
+    rot4.set(identity());
+    rotate4(rot4, 0, 3, angle4[0] + tilt[0]);
+    rotate4(rot4, 1, 3, angle4[1] + tilt[1]);
+    rotate4(rot4, 2, 3, angle4[2]);
+    if (!pointers.size) spin += dt * val('orbit') * 0.6;
+    view.set(identity());
+    rotate4(view, 0, 2, yaw + spin);
+    rotate4(view, 1, 2, pitch);
+
+    if (media.camOn && (camTimer -= dt) <= 0) {
+      camTimer = 0.25;
+      const c = media.colours();
+      if (c) for (let i = 0; i < 9; i++) camCols[i] += (c[i] - camCols[i]) * 0.4;
+    }
+
+    hueClock += dt * (0.01 + psy * psy * 0.35) * (1 + high);
+    const zoom = val('zoom');
+    const soft = val('soft');
+    const trails = val('trails');
     return {
-      world: {
-        uCamPos: [cx + Math.sin(now * 0.05) * shake, cy, cz],
-        uCamR: [-fz, 0, fx],
-        uCamF: [fx, 0, fz],
-        uLens: [focal, rise, val('warp'), time],
-        uD: data,
-        uP: [val('storm'), val('rain'), val('sand'), val('fold')],
-        uP2: [Math.pow(2, (val('brightness') - 0.5) * 4), 0, 0, 0],
-        uFx1: [val('kaleido'), val('kseg'), val('kspin'), Math.round(val('route'))],
-        uFx2: [val('tunnel'), val('tunspeed'), val('liquid'), val('liqscale')],
-        uFx3: [val('glitch'), 0, 0, 0],
-        uAudio: au,
-        uW: data[329],
+      dots: {
+        uA,
+        uB,
+        uV,
+        uCP,
+        uSym: [sym, genome[G_SYM + 1], 0, 0],
+        uRot4: rot4,
+        uView: view,
+        uProj: [1.9, 5.6 - zoom * 4.2, genome[G_PERSP] * (0.3 + dim * 0.9), 1],
+        uPal,
+        uCam: camCols,
       },
-      fx: {
-        uTime: time,
-        uRoute: Math.round(val('route')),
-        uBloom: val('bloom'),
-        uRgb: val('rgb'),
-        uEdge: val('edge'),
-        uPoster: val('poster'),
-        uGlitch: val('glitch'),
-        uCamMix: media.camOn ? val('cammix') : 0,
-        uVidMix: media.vidKind ? val('vidmix') : 0,
-        uFb: [val('feedback'), val('fbzoom'), val('fbrot'), val('fbhue')],
-        uAcid: [val('acid'), val('acidcyc'), val('acidspeed')],
-        uFlameP: [flame, val('flamezoom')],
-        uAudio: au,
-      },
-      grade: { uTime: time, uHue: val('hue'), uSat: val('saturation'), uContrast: val('contrast'), uGlitch: val('glitch') },
-      cam: media.camOn ? media.cam : null,
-      vid: media.vidKind ? media.vid : null,
+      size: (0.9 + soft * soft * 9) * (1 + bass * 0.8 + pulse * 1.5),
+      dof: soft * 0.9,
+      gain: 1,
+      glow: val('glow') * (1 + bass + pulse * 2),
+      hue: val('hue') + hueClock,
+      spread: 0.7 + psy * 1.6,
+      camMix: media.camOn ? val('camcol') : 0,
+      tone: [9 + psy * 20, 0.34 + bass * 0.12 + pulse * 0.2, 1.25 + psy * 0.9, 0],
+      // feedback: persistence, zoom, twist, colour cycle (the last three grow with psychedelia)
+      fb: [trails * 0.97, psy * 0.012 * (1 + bass * 2), (psy - 0.3) * 0.02, psy * psy * 0.25],
+      bright: Math.pow(2, (val('brightness') - 0.5) * 3),
+      time: now / 1000,
     };
   };
 
-  // ------------------------------------------------------------------ high-resolution stills
+  // ------------------------------------------------------------------ stills
   const progress = $('progress');
   const nextFrame = (): Promise<void> => new Promise((r) => requestAnimationFrame(() => r()));
 
   /**
-   * Render the current frame `width` pixels wide and save it as PNG. The image is
-   * drawn in small tiles and streamed into the encoder band by band, so neither the
-   * GPU nor the browser ever holds the full picture: this is what lets a phone make an 8K image.
+   * Render the current form `width` pixels wide and save it as PNG. Each tile gets many
+   * passes of fresh dots (hundreds of millions in total on a desktop GPU) and is streamed
+   * straight into the encoder, so the full image never sits in memory.
    */
   const still = async (width: number): Promise<void> => {
     if (busy || !renderer.ready) return;
-    if (!PngStream.supported) return toast('This browser cannot stream-compress images. Please update it to export stills.', 6000);
+    if (!PngStream.supported) return toast('This browser cannot stream-compress images. Please update it to save stills.', 6000);
     busy = true;
     const W = width;
     const H = Math.max(2, Math.round((W * canvas.clientHeight) / Math.max(1, canvas.clientWidth)));
+    // Enough dots for the pixel count: about 1.5 per pixel on desktop, fewer on phones.
+    const want = W * H * (mobile ? 0.25 : 1.5);
+    const keep = renderer.count;
+    renderer.count = renderer.capacity;
+    const passes = Math.max(2, Math.min(64, Number(query.get('passes')) || Math.round(want / renderer.count)));
     progress.hidden = false;
     const setProgress = (f: number, text: string): void => {
       $('progress-bar').style.width = `${Math.round(f * 100)}%`;
       $('progress-text').textContent = text;
     };
-    setProgress(0, `Rendering ${W}×${H}…`);
+    const millions = ((passes * renderer.count) / 1e6).toFixed(0);
+    setProgress(0, `Rendering ${W}×${H} from ${millions} million dots…`);
     try {
       const frame = compose(performance.now(), 0); // freeze this instant
-      renderer.render(frame);
       await nextFrame();
       const png = new PngStream(W, H);
       const band = new Uint8Array(W * TILE * 4);
       const tilePx = new Uint8Array(TILE * TILE * 4);
       const bands = Math.ceil(H / TILE);
+      const cols = Math.ceil(W / TILE);
       for (let j = 0; j < bands; j++) {
-        const rows = Math.min(TILE, H - j * TILE); // image rows j*TILE .. j*TILE+rows, from the top
-        const oy = H - j * TILE - rows; // GL y of the band's bottom edge
-        for (let ox = 0; ox < W; ox += TILE) {
+        const rows = Math.min(TILE, H - j * TILE);
+        const oy = H - j * TILE - rows;
+        for (let i = 0; i < cols; i++) {
+          const ox = i * TILE;
           const w = Math.min(TILE, W - ox);
           if (renderer.lost) throw new Error('the graphics context was lost');
-          renderer.tile(frame, W, H, ox, oy, TILE, w, rows, tilePx);
+          renderer.tile(frame, W, H, ox, oy, TILE, w, rows, passes, tilePx);
           for (let r = 0; r < rows; r++) band.set(tilePx.subarray(r * w * 4, (r + 1) * w * 4), (r * W + ox) * 4);
+          setProgress((j * cols + i + 1) / (bands * cols), `Rendering ${W}×${H} from ${millions} million dots… ${Math.round(((j * cols + i + 1) / (bands * cols)) * 100)}%`);
+          await nextFrame(); // keep the page responsive and the GPU watchdog calm
         }
         await png.write(band.subarray(0, W * rows * 4), rows);
-        setProgress((j + 1) / bands, `Rendering ${W}×${H}… ${Math.round(((j + 1) / bands) * 100)}%`);
-        await nextFrame(); // keep the page responsive and the GPU watchdog calm
       }
       setProgress(1, 'Saving…');
       const blob = await png.finish();
@@ -441,6 +489,7 @@ async function boot(): Promise<void> {
       toast(`The still could not be rendered: ${(e as Error).message}`, 6000);
     } finally {
       renderer.freeTiles();
+      renderer.count = keep;
       progress.hidden = true;
       busy = false;
     }
@@ -464,14 +513,13 @@ async function boot(): Promise<void> {
       if (e.key === 'Escape') (e.target as HTMLElement).blur();
       return;
     }
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
     if (e.code === 'Space') {
       e.preventDefault();
-      if (!e.repeat) engine.strike(true);
-      return;
+      return next();
     }
-    if (e.key === '1') return loadDefault();
-    if (e.key === '2') return loadCustom();
+    if (e.code === 'KeyL') return love();
+    if (e.code === 'KeyN') return newLife();
     if (e.code === 'KeyZ') octave = Math.max(-2, octave - 1);
     if (e.code === 'KeyX') octave = Math.min(2, octave + 1);
     const n = NOTE_KEYS[e.code];
@@ -487,16 +535,11 @@ async function boot(): Promise<void> {
 
   // ------------------------------------------------------------------ mouse and touch
   let pinch = 0;
-  const xyAt = (e: PointerEvent, down: boolean): void => {
-    const r = canvas.getBoundingClientRect();
-    audio.post({ t: 'xy', x: clamp((e.clientX - r.left) / r.width), y: clamp(1 - (e.clientY - r.top) / r.height), d: down });
-  };
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     canvas.classList.add('drag');
     pinch = 0;
-    if (xyOn && pointers.size === 1) xyAt(e, true);
   });
   canvas.addEventListener('pointermove', (e) => {
     const p = pointers.get(e.pointerId);
@@ -506,31 +549,25 @@ async function boot(): Promise<void> {
     p.x = e.clientX;
     p.y = e.clientY;
     if (pointers.size === 1) {
-      if (xyOn) xyAt(e, true);
-      else {
-        yaw -= dx * 0.005;
-        setParam(P('eye'), val('eye') + dy * 0.0012); // drag down: the camera rises
-      }
+      yaw += dx * 0.006;
+      pitch = clamp(pitch + dy * 0.006, -1.5, 1.5);
     } else if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (pinch > 0) setParam(P('zoom'), val('zoom') - (d - pinch) * 0.003);
+      if (pinch > 0) setParam(P('zoom'), val('zoom') + (d - pinch) * 0.003);
       pinch = d;
     }
   });
   const release = (e: PointerEvent): void => {
     pointers.delete(e.pointerId);
     pinch = 0;
-    if (!pointers.size) {
-      canvas.classList.remove('drag');
-      if (xyOn) xyAt(e, false);
-    }
+    if (!pointers.size) canvas.classList.remove('drag');
   };
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    setParam(P('zoom'), val('zoom') + e.deltaY * 0.0006);
+    setParam(P('zoom'), val('zoom') - e.deltaY * 0.0006);
   }, { passive: false });
 
   // ------------------------------------------------------------------ start-up
@@ -546,41 +583,32 @@ async function boot(): Promise<void> {
       }
     }
     $('splash').classList.add('gone');
+    // The Earth feed is on by default: it only downloads public data and sends nothing about you.
+    if (!query.has('offline')) void device('earth', true);
   };
   $('start').addEventListener('click', () => void start(true));
   $('start-silent').addEventListener('click', () => void start(false));
-
   renderSaved();
   refreshDevices();
-  loadDefault();
-  splashStatus.textContent = 'Building the world…';
-  // Start modest on phones and on WebGL1 hardware; the renderer steps down further by itself
-  // if a tier will not compile, and the loop below steps down if it will not run smoothly.
-  const wantTier = query.has('tier') ? Number(query.get('tier')) : renderer.api === 'WebGL1' || mobile ? 1 : 2;
-  try {
-    await renderer.init(clamp(wantTier, 0, 2));
-  } catch (e) {
-    console.error(e);
-    splashStatus.textContent = `This GPU could not build the world shader (${renderer.api}).`;
-    return;
-  }
-  splashStatus.textContent = '';
-  const fixedScale = Number(query.get('scale')) || 0;
-  renderer.scale = fixedScale || (mobile ? 0.35 : 0.5);
 
   // ------------------------------------------------------------------ main loop
+  const stat = $('stat');
+  const statusEl = $('status');
+  const fixedScale = Number(query.get('scale')) || 0;
+  renderer.scale = fixedScale || (mobile ? 0.5 : 0.7);
+  const fixedDots = query.has('dots'); // ?dots=N pins the swarm size (testing, recording)
+  let budget = fixedDots ? capacity : mobile ? 150_000 : 600_000; // dots the GPU has shown it can draw per frame
   let last = performance.now();
   let acc = 0;
   let frames = 0;
   let lastDown = 0;
-  let slow = 0;
-  let switching = false;
   const frame = (now: number): void => {
     requestAnimationFrame(frame);
     const rawDt = (now - last) / 1000;
     last = now;
     if (busy || document.hidden) return;
     renderer.resize();
+    renderer.count = Math.max(20_000, Math.round(Math.min(budget, renderer.capacity) * (0.08 + 0.92 * val('dots'))));
     renderer.render(compose(now, Math.min(rawDt, 0.1)));
 
     if (rawDt < 0.25) {
@@ -591,30 +619,26 @@ async function boot(): Promise<void> {
     const fps = frames / acc;
     acc = 0;
     frames = 0;
-    // Resolution governor: hold the frame rate by trading internal pixels, never above the budget.
-    const px = canvas.width * canvas.height;
-    const cap = Math.min(1, Math.sqrt((BUDGET[quality][renderer.tier] * 1e6) / px));
-    const floor = Math.min(cap, 0.16);
-    if (fixedScale) {
-      renderer.scale = fixedScale;
-    } else if (quality === 'sharp') {
-      renderer.scale = 1;
-    } else if (fps < 38 && renderer.scale > floor) {
-      renderer.scale = Math.max(floor, renderer.scale * (fps < 20 ? 0.7 : 0.86));
+    // Governor: hold the frame rate by trading dots first, then internal pixels.
+    const cap = quality === 'eco' ? 0.45 : 1;
+    if (fixedScale) renderer.scale = fixedScale;
+    else if (quality === 'sharp') renderer.scale = 1;
+    if (fixedDots) {
+      /* swarm size pinned by the URL */
+    } else if (fps < 40) {
+      budget = Math.max(40_000, budget * (fps < 22 ? 0.6 : 0.85));
+      if (budget <= 60_000 && !fixedScale && quality !== 'sharp') renderer.scale = Math.max(0.3, renderer.scale * 0.88);
       lastDown = now;
-    } else if (fps > 55 && now - lastDown > 4000 && renderer.scale < cap) {
-      renderer.scale = Math.min(cap, renderer.scale * 1.08);
+    } else if (fps > 55 && now - lastDown > 2500) {
+      if (!fixedScale && quality !== 'sharp' && renderer.scale < cap) renderer.scale = Math.min(cap, renderer.scale * 1.08);
+      else budget = Math.min(renderer.capacity, budget * 1.15);
     }
-    if (!fixedScale) renderer.scale = Math.min(renderer.scale, Math.max(cap, floor));
-    // Still crawling at the lowest resolution: drop to a simpler shader.
-    slow = fps < 18 && renderer.scale <= floor * 1.05 ? slow + 1 : 0;
-    if (slow >= 4 && renderer.tier > 0 && !switching && !query.has('tier')) {
-      switching = true;
-      slow = 0;
-      void renderer.setTier(renderer.tier - 1).finally(() => (switching = false));
-    }
+    if (!fixedScale && quality === 'eco') renderer.scale = Math.min(renderer.scale, cap);
     const [sw, sh] = renderer.internal;
-    stat.textContent = `${Math.round(fps)} fps · ${sw}×${sh} → ${canvas.width}×${canvas.height} · ${renderer.api} T${renderer.tier}`;
+    const dots = renderer.count >= 1e6 ? `${(renderer.count / 1e6).toFixed(1)}M` : `${Math.round(renderer.count / 1000)}k`;
+    stat.textContent = `${Math.round(fps)} fps · ${dots} dots · ${sw}×${sh} → ${canvas.width}×${canvas.height}`;
+    const info = engine.info();
+    statusEl.textContent = `Generation ${info.generation} · fitness ${info.fitness.toFixed(2)} · pool ${info.poolFitness.toFixed(2)}${info.loved ? ` · ♥ ${info.loved}` : ''}${earth.status ? `\n${earth.status}` : ''}`;
   };
   requestAnimationFrame(frame);
 }

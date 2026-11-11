@@ -134,7 +134,7 @@ button:focus-visible {
   color: var(--accent);
 }
 
-#presets {
+#actions {
   display: flex;
   gap: 6px;
   overflow-x: auto;
@@ -143,20 +143,20 @@ button:focus-visible {
   scrollbar-width: none;
 }
 
-#presets button {
+#actions button {
   display: flex;
   align-items: center;
   gap: 7px;
 }
 
-#presets button i {
+#actions button i {
   font-style: normal;
   font-family: ui-monospace, monospace;
   font-size: 11px;
   color: var(--dim);
 }
 
-#presets button.on i {
+#actions button.on i {
   color: var(--accent);
 }
 
@@ -214,7 +214,7 @@ details[open] > summary {
 
 .grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 6px;
   margin-bottom: 8px;
 }
@@ -342,6 +342,33 @@ input[type='range'] {
   font-size: 12px;
 }
 
+#status {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: end;
+  justify-self: start;
+  max-width: 100%;
+  padding: 6px 12px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--dim);
+  background: rgba(5, 7, 12, 0.55);
+  border-radius: 8px;
+  pointer-events: none !important;
+  white-space: pre-line;
+}
+
+#status:empty {
+  display: none;
+}
+
+#btn-love.on {
+  border-color: #ff5f9e;
+  color: #ff5f9e;
+  background: rgba(255, 95, 158, 0.12);
+}
+
 #toast {
   position: fixed;
   left: 50%;
@@ -458,12 +485,15 @@ body.hidden-ui #unhide {
     order: 1;
     margin-left: auto;
   }
-  #presets {
+  #actions {
     order: 2;
     flex-basis: 100%;
   }
   #stat {
     display: none;
+  }
+  #status {
+    grid-row: 3;
   }
   #panel {
     grid-column: 1;

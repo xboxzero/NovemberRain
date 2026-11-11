@@ -1,23 +1,20 @@
 //! NovemberRain engine. Compiled to a plain `wasm32-unknown-unknown` module with a
 //! C ABI (no JS glue), so the very same binary can be instantiated on the main
-//! thread (simulation + fractal flame) and inside an AudioWorklet (synthesizer).
+//! thread (evolution) and inside an AudioWorklet (synthesizer).
 
-mod flame;
+mod evo;
 mod params;
 mod rng;
-mod sim;
 mod synth;
 
-use flame::Flame;
+use evo::Evolution;
 use params::{defaults, NP};
-use sim::Sim;
 use synth::Synth;
 
 struct Engine {
     params: [f32; NP],
-    sim: Sim,
+    evo: Option<Evolution>,
     synth: Synth,
-    flame: Option<Flame>,
     seed: u32,
     defaults: [f32; NP],
     describe: String,
@@ -25,15 +22,11 @@ struct Engine {
 
 impl Engine {
     fn new(seed: u32, sample_rate: f32) -> Self {
-        Engine {
-            params: defaults(),
-            sim: Sim::new(seed),
-            synth: Synth::new(seed, sample_rate),
-            flame: None,
-            seed,
-            defaults: defaults(),
-            describe: params::describe_json(),
-        }
+        Engine { params: defaults(), evo: None, synth: Synth::new(seed, sample_rate), seed, defaults: defaults(), describe: params::describe_json() }
+    }
+    fn evo(&mut self) -> &mut Evolution {
+        let seed = self.seed;
+        self.evo.get_or_insert_with(|| Evolution::new(seed))
     }
 }
 
@@ -94,74 +87,58 @@ pub extern "C" fn params_ptr() -> *const f32 {
     eng().params.as_ptr()
 }
 
-/// Pointer to the default parameter values (NP floats) of preset 1.
 #[no_mangle]
 pub extern "C" fn defaults_ptr() -> *const f32 {
     eng().defaults.as_ptr()
 }
 
-// ---- simulation --------------------------------------------------------------------
+// ---- evolution -----------------------------------------------------------------------
 
+/// Advance the evolving organism and return a pointer to its current (morphing) genome.
 #[no_mangle]
-pub extern "C" fn step(dt: f32, bass: f32, mid: f32, high: f32) {
+pub extern "C" fn evolve(dt: f32, kick: f32) -> *const f32 {
     let e = eng();
-    let p = e.params;
-    e.sim.step(dt, &p, bass.clamp(0.0, 1.0), mid.clamp(0.0, 1.0), high.clamp(0.0, 1.0));
+    let (speed, mutation) = (e.params[params::EVOLVE], e.params[params::MUTATION]);
+    let ev = e.evo();
+    ev.step(dt, speed, mutation, kick.clamp(0.0, 1.0));
+    ev.out.as_ptr()
 }
 
 #[no_mangle]
-pub extern "C" fn data_ptr() -> *const f32 {
-    eng().sim.data.as_ptr()
+pub extern "C" fn genome_len() -> usize {
+    evo::GLEN
+}
+
+/// (generation, fitness, morph progress, mean fitness of the pool, loved count, born-this-step flag)
+#[no_mangle]
+pub extern "C" fn info_ptr() -> *const f32 {
+    eng().evo().info.as_ptr()
 }
 
 #[no_mangle]
-pub extern "C" fn data_len() -> usize {
-    sim::ND * 4
+pub extern "C" fn love() {
+    eng().evo().love();
 }
 
 #[no_mangle]
-pub extern "C" fn events_ptr() -> *const f32 {
-    eng().sim.events.as_ptr()
+pub extern "C" fn skip() {
+    eng().evo().skip();
 }
 
 #[no_mangle]
-pub extern "C" fn events_len() -> usize {
-    eng().sim.n_events
+pub extern "C" fn reseed() {
+    eng().evo().reseed();
 }
 
-/// Height of the dune surface, so the camera can stand on the sand.
+/// Scratch genome: write `genome_len()` floats here, then call `adopt()` to load them.
 #[no_mangle]
-pub extern "C" fn ground(x: f32, z: f32) -> f32 {
-    let e = eng();
-    sim::dune(x, z, e.params[params::FOLD], e.sim.w())
-}
-
-/// Throw a lightning bolt right now; `to_titan` != 0 aims it at the skull.
-#[no_mangle]
-pub extern "C" fn strike(to_titan: u32) {
-    let e = eng();
-    let fold = e.params[params::FOLD];
-    e.sim.strike(1.0, to_titan != 0, fold);
-}
-
-// ---- fractal flame -------------------------------------------------------------------
-
-/// Advance the fractal flame by `iters` chaos-game iterations and return a pointer
-/// to its RGBA8 image (`flame_size()` squared pixels).
-#[no_mangle]
-pub extern "C" fn flame_render(iters: usize, dt: f32, energy: f32) -> *const u8 {
-    let e = eng();
-    let seed = e.seed;
-    let p = e.params;
-    let w = e.sim.w();
-    let f = e.flame.get_or_insert_with(|| Flame::new(seed));
-    f.render(iters.min(2_000_000), dt, p[params::FLAMEVAR], p[params::FLAMESYM], p[params::FLAMESPEED], w, p[params::HUE], energy);
-    f.rgba.as_ptr()
+pub extern "C" fn io_ptr() -> *mut f32 {
+    eng().evo().io.as_mut_ptr()
 }
 
 #[no_mangle]
-pub extern "C" fn flame_size() -> usize {
-    flame::SIZE
+pub extern "C" fn adopt() {
+    eng().evo().adopt();
 }
 
 // ---- synthesizer -------------------------------------------------------------------

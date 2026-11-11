@@ -10,6 +10,15 @@ export interface ParamDef {
   options: string[];
 }
 
+export interface EvoInfo {
+  generation: number;
+  fitness: number;
+  progress: number;
+  poolFitness: number;
+  loved: number;
+  born: boolean;
+}
+
 interface Exports {
   memory: WebAssembly.Memory;
   init(seed: number, sampleRate: number): void;
@@ -19,28 +28,26 @@ interface Exports {
   get_param(id: number): number;
   params_ptr(): number;
   defaults_ptr(): number;
-  strike(toTitan: number): void;
-  step(dt: number, bass: number, mid: number, high: number): void;
-  data_ptr(): number;
-  data_len(): number;
-  events_ptr(): number;
-  events_len(): number;
-  ground(x: number, z: number): number;
-  flame_render(iters: number, dt: number, energy: number): number;
-  flame_size(): number;
+  evolve(dt: number, kick: number): number;
+  genome_len(): number;
+  info_ptr(): number;
+  love(): void;
+  skip(): void;
+  reseed(): void;
+  io_ptr(): number;
+  adopt(): void;
 }
 
 export class Engine {
   readonly params: ParamDef[];
-  readonly world: string;
   readonly byKey = new Map<string, ParamDef>();
-  private dec = new TextDecoder();
+  readonly genomeLength: number;
 
   private constructor(private x: Exports, readonly wasmBytes: ArrayBuffer) {
-    const d = JSON.parse(this.str(x.describe_ptr(), x.describe_len())) as { params: ParamDef[]; world: string };
-    this.params = d.params;
-    this.world = d.world;
-    for (const p of d.params) this.byKey.set(p.key, p);
+    const json = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.describe_ptr(), x.describe_len()));
+    this.params = (JSON.parse(json) as { params: ParamDef[] }).params;
+    for (const p of this.params) this.byKey.set(p.key, p);
+    this.genomeLength = x.genome_len();
   }
 
   static async load(url: string): Promise<Engine> {
@@ -49,10 +56,6 @@ export class Engine {
     const x = instance.exports as unknown as Exports;
     x.init((Math.random() * 0xffffffff) >>> 0, 48000);
     return new Engine(x, bytes);
-  }
-
-  private str(ptr: number, len: number): string {
-    return this.dec.decode(new Uint8Array(this.x.memory.buffer, ptr, len));
   }
 
   id(key: string): number {
@@ -69,44 +72,46 @@ export class Engine {
     return this.x.get_param(id);
   }
 
-  /** Live view of all parameter values (do not keep across calls that may grow memory). */
+  /** Copy of all parameter values. */
   values(): Float32Array {
-    return new Float32Array(this.x.memory.buffer, this.x.params_ptr(), this.params.length);
+    return new Float32Array(this.x.memory.buffer, this.x.params_ptr(), this.params.length).slice();
   }
 
-  /** Parameter values of preset 1. */
   defaults(): Float32Array {
     return new Float32Array(this.x.memory.buffer, this.x.defaults_ptr(), this.params.length).slice();
   }
 
-  /** Throw a lightning bolt now. */
-  strike(toTitan: boolean): void {
-    this.x.strike(toTitan ? 1 : 0);
+  /**
+   * Advance evolution by `dt` seconds and return the genome currently on screen
+   * (a view into wasm memory: read it before the next call). `kick` is a one-off
+   * mutation impulse in 0..1.
+   */
+  evolve(dt: number, kick: number): Float32Array {
+    const ptr = this.x.evolve(dt, kick);
+    return new Float32Array(this.x.memory.buffer, ptr, this.genomeLength);
   }
 
-  step(dt: number, bass: number, mid: number, high: number): void {
-    this.x.step(dt, bass, mid, high);
+  info(): EvoInfo {
+    const v = new Float32Array(this.x.memory.buffer, this.x.info_ptr(), 6);
+    return { generation: v[0], fitness: v[1], progress: v[2], poolFitness: v[3], loved: v[4], born: v[5] > 0.5 };
   }
 
-  /** World state for the shader: 84 vec4. */
-  data(): Float32Array {
-    return new Float32Array(this.x.memory.buffer, this.x.data_ptr(), this.x.data_len());
+  love(): void {
+    this.x.love();
   }
 
-  /** Events raised by the last step: [kind, a, b, c] each. */
-  events(): Float32Array {
-    return new Float32Array(this.x.memory.buffer, this.x.events_ptr(), this.x.events_len() * 4);
+  skip(): void {
+    this.x.skip();
   }
 
-  /** Height of the sand at (x, z). */
-  ground(x: number, z: number): number {
-    return this.x.ground(x, z);
+  reseed(): void {
+    this.x.reseed();
   }
 
-  /** Run the fractal flame chaos game and return its square RGBA image. */
-  flame(iters: number, dt: number, energy: number): { pixels: Uint8Array; size: number } {
-    const size = this.x.flame_size();
-    const ptr = this.x.flame_render(iters, dt, energy);
-    return { pixels: new Uint8Array(this.x.memory.buffer, ptr, size * size * 4), size };
+  /** Load a saved genome: it joins the gene pool as a loved member and the picture morphs to it. */
+  adopt(genome: ArrayLike<number>): void {
+    if (genome.length !== this.genomeLength) return;
+    new Float32Array(this.x.memory.buffer, this.x.io_ptr(), this.genomeLength).set(genome);
+    this.x.adopt();
   }
 }

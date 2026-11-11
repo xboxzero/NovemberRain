@@ -1,13 +1,11 @@
 //! Sound synthesizer, built around historical well temperaments.
 //!
-//! Every pitch in the engine goes through `Synth::freq`, which looks the note up
-//! in a 12-tone circulating temperament (Werckmeister III by default) instead of
-//! equal temperament. Because those tunings give each key its own colour, the
-//! music is deliberately tonal: a pipe-organ style chord progression in a minor
-//! key, a pedal bass and a harpsichord-like melody that outlines the chords.
-//! Changing `Key` transposes the piece and audibly changes the size of its thirds
-//! and fifths. Weather and impacts (wind, rain, thunder, footfalls, the electric
-//! crack when the titan is struck) are layered on top.
+//! Every pitch goes through `Synth::freq`, which looks the note up in a 12-tone
+//! circulating temperament (Werckmeister III by default) instead of equal
+//! temperament. The music is tonal on purpose: organ chords, a pedal bass and a
+//! plucked melody in a minor key, so each key keeps its own colour. The fractal
+//! drives it: every new generation of the evolving organism rings a bell, and
+//! its energy opens the filter.
 //!
 //! The effect section can be wired in series (dry -> echo -> reverb) or in
 //! parallel (echo and reverb both fed from the dry signal).
@@ -510,13 +508,13 @@ impl Synth {
         let h = p[HARMONICS];
         let partials = [1.0, 0.5, 0.22 + 0.3 * h, 0.5 * h, 0.35 * h * h];
         let tex = p[TEXTURE];
-        let wind_amt = tex * (0.05 + p[WIND] * 0.3);
-        let rain_amt = tex * p[RAIN] * 0.05;
-        let wind_g = svf_g(300.0 + 240.0 * self.lfo1.sin() + 170.0 * (self.lfo2 * 2.3).sin() + 300.0 * p[WIND], sr);
-        let wind_g2 = svf_g(480.0 + 280.0 * (self.lfo1 * 1.7 + 1.0).sin() + 300.0 * p[WIND], sr);
+        let wind_amt = tex * 0.2;
+        let rain_amt = 0.0;
+        let wind_g = svf_g(300.0 + 240.0 * self.lfo1.sin() + 170.0 * (self.lfo2 * 2.3).sin() + 100.0, sr);
+        let wind_g2 = svf_g(480.0 + 280.0 * (self.lfo1 * 1.7 + 1.0).sin() + 100.0, sr);
         let lp_rain = pole(4200.0, sr);
         let lp_rumble = pole(90.0, sr);
-        let impact = p[IMPACT];
+        let impact = 0.8;
         let bpm = 40.0 + p[TEMPO] * 140.0;
         let step_len = sr * 60.0 / bpm / 4.0;
         let th_dec = (-1.0 / (1.1 * sr)).exp();
@@ -608,7 +606,7 @@ impl Synth {
                 self.wx_lp[0] += lp_rain * (white - self.wx_lp[0]);
                 let rain = (white - self.wx_lp[0]) * rain_amt;
                 self.wx_lp[1] += lp_rumble * (white2 - self.wx_lp[1]);
-                let rumble = self.wx_lp[1] * 0.6 * tex * p[STORM];
+                let rumble = self.wx_lp[1] * 0.15 * tex;
                 l += wl * wind_amt + rain + rumble;
                 r += wr * wind_amt + rain + rumble;
             }

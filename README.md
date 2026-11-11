@@ -1,47 +1,42 @@
 # NovemberRain
 
-An experimental visual-programming instrument for the browser, in the spirit of TouchDesigner and Unreal Engine. One world, rendered in real time: **a titan skeleton walking through sand dunes in a thunderstorm**. You photograph it like architecture, bend it through a fourth dimension, push it through a routable psychedelic effect chain with fractal flames, and play a well-tempered synthesizer alongside it.
+A living fractal in four dimensions, drawn entirely in dots. It breeds, mutates and evolves by itself, listens to your devices and to the Earth, and you act as natural selection.
 
 Live: https://xboxzero.github.io/NovemberRain/
 
 Written in **Rust** (compiled to WebAssembly) and **TypeScript** (WebGL, Web Audio).
 
-## What it does
+## What it is
 
 | | |
 |---|---|
-| **Runs on modest hardware** | One set of GLSL ES 1.00 shaders serves both WebGL2 and WebGL1. Three detail tiers; the renderer steps down automatically if a tier will not compile or will not hold the frame rate. All buffers are plain 8-bit and live at an adaptive internal resolution; the final pass sharpens while stretching to the display. |
-| **8K without the memory** | The canvas matches the display's real pixels (an 8K screen gets an 8K canvas) while the heavy work stays at the internal resolution. **8K PNG** renders the frozen frame in 512-pixel tiles and streams them band by band through the browser's native deflate into the file, so neither GPU nor page ever holds the full image. |
-| **Skeleton** | Built from anatomical parts: vertebral column, sloped ribs with costal arch and sternum, clavicles and scapulae, iliac bowl with sacrum and pubic arch, femur with neck and trochanter, patella, tibia and fibula, heel, arch and toes, radius and ulna, palm and fingers, cranium with brow ridge, orbits, nasal aperture, zygomatic arches, teeth and a hinged mandible. |
-| **Dunes** | Transverse dunes with the real cross-section: a long windward slope, a sharp crest and a slip face near the angle of repose (measured maximum 35 degrees), sinuous crest lines, interdune flats, wind ripples that fade by pixel footprint, footprints and damp sand. |
-| **Architectural camera** | The camera stands on the sand at eye height, the film plane stays vertical and the lens is shifted rather than tilted, so verticals never converge (two-point perspective). Controls: distance, eye height, lens from wide to tele, lens shift. |
-| **Simulation** | Feet planted on the terrain with two-bone IK, a spring-damper pelvis that takes an impulse at every heel strike, pendulum arms, stepped-leader lightning that prefers the titan, thunder delayed by distance, wind-driven ballistic dust. |
-| **Fractal flame** | A real flame generator in Rust: an iterated function system of three drifting affine maps with blended non-linear variations (linear, sinusoidal, spherical, swirl, horseshoe, bubble), rotational symmetry, iterated colour and log-density tone mapping. Controls: amount, variation, symmetry, morph speed, size. |
-| **Psychedelic FX** | Kaleidoscope, tunnel, liquid and glitch remap the image plane *before* rays are cast, so they cost nothing extra and stay sharp at any resolution. Spectrum, neon edges, posterize, RGB split and feedback trails follow. Both stages run in **serial** or **parallel**; the audio effects have the same switch. |
-| **Sound** | Every pitch comes from a well temperament (Werckmeister III by default, Kirnberger III, Vallotti, Young II, equal for comparison). Organ chords, pedal bass and a harpsichord-like melody in a selectable key; thunder, footfalls and strikes triggered by the simulation. |
-| **Inputs** | Camera, microphone, screen capture, video file, keyboard (A-K notes, Z/X octave, Space throws lightning), mouse, touchscreen (drag, pinch, XY synth pad). |
-| **Presets** | 1 Titan Storm, 2 Custom: save, load, export and import your own. |
+| **4D fractal** | Each organism is an iterated function system in four dimensions: four maps, each an affine transform of (x, y, z, w) followed by a blend of non-linear variations (linear, sinusoidal, spherical, swirl), with a rotational symmetry that couples the xy and zw planes. It is rotated in the three planes that involve the fourth axis and perspective-projected 4D to 3D to screen. |
+| **Dots only** | Everything on screen is point particles: up to 3 million per frame on desktop, a few hundred thousand on a phone. Every dot finds its own place on the GPU by playing the chaos game from a 4-byte random seed, so there is no geometry to store. New seeds every frame mean detail keeps accumulating through the trails. |
+| **Gaussian** | Each dot is a Gaussian splat. Out of focus it widens while keeping its energy (depth of field); a few become wide halos (glow). Dots add up in a floating-point density buffer that is developed like a fractal flame: brightness is the logarithm of density. Mutation in the genetic algorithm is Gaussian too. |
+| **Evolution** | A gene pool of ten organisms. Parents are chosen by tournament, crossed over map by map and mutated; the child is scored by an automatic fitness function that samples its attractor and rewards forms that are bounded, neither collapsed nor a formless cloud, use all four axes, and have a box-counting dimension near 2. The picture morphs from each generation to the next. **Love** protects a form and makes it breed; **Next** rejects it; **New life** restarts the pool. |
+| **Senses** | **Mic**: sound makes it pulse, and loud beats make the next generation mutate harder. **Camera**: it takes its colours from what the camera sees. **Tilt**: turning the phone turns it through the 4th dimension. **Earth**: every earthquake of the last hour (USGS) shakes the gene pool in proportion to its magnitude, and wind and temperature at a wild place on the planet (Open-Meteo) set its drift through the 4th dimension and the warmth of its colours. |
+| **8K** | **8K PNG** renders the current form 7680 pixels wide in 1024-pixel tiles, each built from many passes of fresh dots (about 50 million in total on desktop), and streams them into the file, so memory stays flat even on a phone. |
+| **Sound** | A well-tempered synthesizer (Werckmeister III by default) plays organ chords, a pedal bass and a plucked melody; each birth rings a note chosen by the newborn's genes. |
+| **Simple controls** | Thirteen sliders in four groups: Life (evolution speed, mutation, symmetry), Space (4th dimension, spin, zoom), Dots (count, softness, glow), Colour (colour, psychedelia, trails, brightness). Senses and Sound are folded away. |
 
 ## How it is built
 
 ```
-engine/            Rust crate -> engine.wasm (about 100 kB, plain C ABI, no JS glue)
-  src/params.rs    parameter table shared by everything (the UI is generated from it)
-  src/sim.rs       physics: terrain, walk, IK, pendulums, lightning, wind, dust
-  src/flame.rs     fractal flame chaos game
+engine/            Rust crate -> engine.wasm (under 100 kB, plain C ABI, no JS glue)
+  src/evo.rs       genome, crossover, Gaussian mutation, fitness, gene pool, morphing
   src/synth.rs     the well-tempered synthesizer
+  src/params.rs    parameter table (the UI is generated from it)
 src/               TypeScript
-  main.ts          app shell: UI, presets, input, camera, resolution governor, still export
-  gl.ts            WebGL1/2 renderer: world -> FX -> sharpen and grade; tiled stills
+  main.ts          app shell: controls, senses, governor, still export
+  gl.ts            WebGL1/2 renderer: dots -> density -> develop + feedback -> sharpen
+  shaders/points.ts  the chaos game in the vertex shader, Gaussian splat
+  shaders/post.ts    log-density development, feedback loop, final pass
+  feeds.ts         earthquake and weather feeds
   png.ts           streaming PNG encoder
-  shaders/         world (three tiers), FX chain, final pass
-  audio.ts         Web Audio graph and analysers
-  synth.worklet.ts AudioWorklet hosting a second instance of the Rust engine
-  media.ts         camera, screen capture, video file
-  presets.ts       custom preset storage, export, import
+  media.ts, audio.ts, synth.worklet.ts, presets.ts
 ```
 
-The dune height function exists in both Rust and GLSL and must stay identical, because the simulation plants the titan's feet on the surface the shader draws.
+The map formula exists twice, in `evo.rs` (for the fitness function) and in `points.ts` (for drawing), and the two must stay identical.
 
 ## Run it
 
@@ -54,7 +49,7 @@ npm run dev      # build the engine and start the dev server
 npm run build    # production build in dist/
 ```
 
-URL switches for testing: `?gl=1` forces WebGL1, `?tier=0|1|2` pins the detail tier, `?scale=0.5` pins the internal resolution.
+URL switches: `?gl=1` forces WebGL1, `?dots=500000` pins the swarm size, `?scale=0.5` pins the internal resolution, `?offline` leaves the Earth feed off.
 
 ## Deploying
 
@@ -62,8 +57,8 @@ URL switches for testing: `?gl=1` forces WebGL1, `?tier=0|1|2` pins the detail t
 
 ## Limits worth knowing
 
-- **Live 8K means an 8K canvas fed from a lower internal resolution**, sharpened on the way up. Tracing every one of 33 million pixels per frame is beyond any phone; the 8K PNG is where every pixel is traced.
-- An 8K still takes from seconds to a few minutes depending on the GPU. It freezes one instant; trails in it come from the on-screen frame.
-- WebGL1 support assumes a GPU that can compile at least the minimal tier. Very old integrated graphics may still refuse, in which case the start screen says so.
-- "Physical" means integrated dynamics (springs, pendulums, ballistic particles, IK), not a rigid-body or fluid solver.
-- The effect order inside each stage is fixed.
+- **Internet use and privacy.** With Earth on (the default), the page downloads two public feeds: earthquakes from `earthquake.usgs.gov` and weather from `api.open-meteo.com` for a fixed list of wild places. No location or identifier is sent; as with any request, those servers see the visitor's IP address. The Earth button turns it off.
+- **Live 8K** means the canvas matches the display's pixels while the dots are splatted at an adaptive internal resolution and sharpened. The 8K PNG is where the full resolution is rendered directly.
+- An 8K still takes seconds on a desktop GPU and longer on a phone, where it uses fewer dots and looks softer.
+- The fitness function measures structure, not beauty. It keeps evolution away from blobs and dust; taste comes from Love and Next.
+- Without a float render target (rare), the density buffer falls back to 8 bits and the image is coarser.

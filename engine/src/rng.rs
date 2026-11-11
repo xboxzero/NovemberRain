@@ -30,3 +30,12 @@ impl Rng {
         a + (b - a) * self.f()
     }
 }
+
+impl Rng {
+    /// Standard normal sample (Box-Muller).
+    pub fn gauss(&mut self) -> f32 {
+        let u = self.f().max(1e-7);
+        let v = self.f();
+        (-2.0 * u.ln()).sqrt() * (core::f32::consts::PI * 2.0 * v).cos()
+    }
+}

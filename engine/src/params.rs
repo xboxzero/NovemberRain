@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-//! The parameter table is the single source of truth shared by the simulation,
-//! the synthesizer and (via `describe_json`) the TypeScript UI.
+//! The parameter table is the single source of truth shared by the evolution
+//! engine, the synthesizer and (via `describe_json`) the TypeScript UI.
 //! Every parameter is normalised to 0..1. A parameter with `options` is a
 //! selector: its value is `index / (options - 1)`.
 
@@ -27,75 +27,42 @@ macro_rules! table {
 }
 
 table! {
-    SPEED = "speed", "Speed", "World", 0.5, [];
-    STORM = "storm", "Lightning", "World", 0.55, [];
-    WIND = "wind", "Wind", "World", 0.5, [];
-    RAIN = "rain", "Rain", "World", 0.45, [];
-    SAND = "sand", "Blowing sand", "World", 0.35, [];
+    EVOLVE = "evolve", "Evolution speed", "Life", 0.5, [];
+    MUTATION = "mutation", "Mutation", "Life", 0.4, [];
+    SYMMETRY = "symmetry", "Symmetry", "Life", 0.0, ["Evolved", "1", "2", "3", "4", "5", "6", "7", "8"];
 
-    ORBIT = "orbit", "Auto orbit", "Camera", 0.15, [];
-    ZOOM = "zoom", "Distance", "Camera", 0.3, [];
-    EYE = "eye", "Eye height", "Camera", 0.06, [];
-    LENS = "lens", "Lens (wide \u{2192} tele)", "Camera", 0.3, [];
-    SHIFT = "shift", "Lens shift", "Camera", 0.5, [];
+    DIM = "dim", "4th dimension", "Space", 0.5, [];
+    ORBIT = "orbit", "Spin", "Space", 0.3, [];
+    ZOOM = "zoom", "Zoom", "Space", 0.5, [];
 
-    WARP = "warp", "Hyper lens", "4D", 0.0, [];
-    WSPEED = "wspeed", "4D drift", "4D", 0.3, [];
-    FOLD = "fold", "Dune fold", "4D", 0.2, [];
+    DOTS = "dots", "Dots", "Dots", 0.7, [];
+    SOFT = "soft", "Softness", "Dots", 0.35, [];
+    GLOW = "glow", "Glow", "Dots", 0.4, [];
 
-    HUE = "hue", "Hue shift", "Look", 0.0, [];
-    SATURATION = "saturation", "Saturation", "Look", 0.55, [];
-    BRIGHTNESS = "brightness", "Brightness", "Look", 0.5, [];
-    CONTRAST = "contrast", "Contrast", "Look", 0.5, [];
-    BLOOM = "bloom", "Bloom", "Look", 0.45, [];
+    HUE = "hue", "Colour", "Colour", 0.0, [];
+    PSY = "psy", "Psychedelia", "Colour", 0.45, [];
+    TRAILS = "trails", "Trails", "Colour", 0.5, [];
+    BRIGHTNESS = "brightness", "Brightness", "Colour", 0.5, [];
 
-    ROUTE = "route", "FX routing", "Psychedelic FX", 0.0, ["Serial", "Parallel"];
-    FLAME = "flame", "Fractal flame", "Psychedelic FX", 0.0, [];
-    FLAMEVAR = "flamevar", "\u{21b3} variation", "Psychedelic FX", 0.35, [];
-    FLAMESYM = "flamesym", "\u{21b3} symmetry", "Psychedelic FX", 0.3, [];
-    FLAMESPEED = "flamespeed", "\u{21b3} morph", "Psychedelic FX", 0.4, [];
-    FLAMEZOOM = "flamezoom", "\u{21b3} size", "Psychedelic FX", 0.5, [];
-    KALEIDO = "kaleido", "Kaleidoscope", "Psychedelic FX", 0.0, [];
-    KSEG = "kseg", "\u{21b3} segments", "Psychedelic FX", 0.35, [];
-    KSPIN = "kspin", "\u{21b3} spin", "Psychedelic FX", 0.2, [];
-    FEEDBACK = "feedback", "Trails", "Psychedelic FX", 0.0, [];
-    FBZOOM = "fbzoom", "\u{21b3} zoom", "Psychedelic FX", 0.55, [];
-    FBROT = "fbrot", "\u{21b3} twist", "Psychedelic FX", 0.55, [];
-    FBHUE = "fbhue", "\u{21b3} colour cycle", "Psychedelic FX", 0.0, [];
-    TUNNEL = "tunnel", "Tunnel", "Psychedelic FX", 0.0, [];
-    TUNSPEED = "tunspeed", "\u{21b3} speed", "Psychedelic FX", 0.4, [];
-    LIQUID = "liquid", "Liquid", "Psychedelic FX", 0.0, [];
-    LIQSCALE = "liqscale", "\u{21b3} scale", "Psychedelic FX", 0.4, [];
-    ACID = "acid", "Spectrum", "Psychedelic FX", 0.0, [];
-    ACIDCYC = "acidcyc", "\u{21b3} bands", "Psychedelic FX", 0.35, [];
-    ACIDSPEED = "acidspeed", "\u{21b3} flow", "Psychedelic FX", 0.3, [];
-    EDGE = "edge", "Neon edges", "Psychedelic FX", 0.0, [];
-    RGB = "rgb", "RGB split", "Psychedelic FX", 0.0, [];
-    POSTER = "poster", "Posterize", "Psychedelic FX", 0.0, [];
-    GLITCH = "glitch", "Glitch", "Psychedelic FX", 0.0, [];
-    REACT = "react", "Audio react", "Psychedelic FX", 0.6, [];
+    REACT = "react", "Sound reaction", "Senses", 0.6, [];
+    CAMCOL = "camcol", "Camera colours", "Senses", 0.8, [];
+    EARTH = "earth", "Earth influence", "Senses", 0.6, [];
 
-    CAMMIX = "cammix", "Camera mix", "Mix", 0.6, [];
-    VIDMIX = "vidmix", "Video mix", "Mix", 0.6, [];
-
-    VOLUME = "volume", "Volume", "Sound", 0.7, [];
+    VOLUME = "volume", "Volume", "Sound", 0.6, [];
     KEY = "key", "Key", "Sound", 0.1818, ["C", "C\u{266f}", "D", "E\u{266d}", "E", "F", "F\u{266f}", "G", "A\u{266d}", "A", "B\u{266d}", "B"];
     TEMPER = "temper", "Temperament", "Sound", 0.0, ["Werckmeister III", "Kirnberger III", "Vallotti", "Young II", "Equal"];
-    AROUTE = "aroute", "Audio FX routing", "Sound", 0.0, ["Serial", "Parallel"];
-    ORGAN = "organ", "Organ chords", "Sound", 0.55, [];
+    AROUTE = "aroute", "Effect routing", "Sound", 0.0, ["Serial", "Parallel"];
+    ORGAN = "organ", "Organ chords", "Sound", 0.5, [];
     HARMONICS = "harmonics", "Harmonics", "Sound", 0.35, [];
-    DRONE = "drone", "Bass drone", "Sound", 0.5, [];
+    DRONE = "drone", "Bass drone", "Sound", 0.45, [];
     CUTOFF = "cutoff", "Filter", "Sound", 0.5, [];
     RESONANCE = "resonance", "Resonance", "Sound", 0.3, [];
     MELODY = "melody", "Melody", "Sound", 0.5, [];
     TEMPO = "tempo", "Tempo", "Sound", 0.3, [];
-    TEXTURE = "texture", "Ambience", "Sound", 0.6, [];
-    IMPACT = "impact", "Impacts", "Sound", 0.75, [];
-    REVERB = "reverb", "Reverb", "Sound", 0.6, [];
-    DELAY = "delay", "Echo", "Sound", 0.3, [];
+    TEXTURE = "texture", "Wind", "Sound", 0.35, [];
+    REVERB = "reverb", "Reverb", "Sound", 0.7, [];
+    DELAY = "delay", "Echo", "Sound", 0.35, [];
 }
-
-pub const WORLD_NAME: &str = "Titan skeleton walking through sand dunes in a thunderstorm";
 
 pub fn defaults() -> [f32; NP] {
     let mut d = [0.0f32; NP];
@@ -113,9 +80,7 @@ pub fn choice(p: &[f32; NP], id: usize) -> usize {
 
 /// JSON description of the parameters for the UI.
 pub fn describe_json() -> String {
-    let mut s = String::from("{\"world\":\"");
-    s.push_str(WORLD_NAME);
-    s.push_str("\",\"params\":[");
+    let mut s = String::from("{\"params\":[");
     for (i, p) in PARAMS.iter().enumerate() {
         if i > 0 {
             s.push(',');
