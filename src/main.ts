@@ -14,13 +14,30 @@ const NOTE_KEYS: Record<string, number> = {
   KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13,
 };
 type Quality = 'auto' | 'eco' | 'sharp';
-const TILE = 1024;
 // genome layout (see engine/src/evo.rs)
-const MAP_LEN = 26;
-const G_SYM = 104;
-const G_PAL = 106;
-const G_ROT = 118;
-const G_PERSP = 121;
+const MAP_LEN = 28;
+const G_SYM = 112;
+const G_PAL = 114;
+const G_ROT = 126;
+const G_PERSP = 129;
+const G_SYM_B = 130;
+const TAU = Math.PI * 2;
+const VARIATIONS = ['linear', 'sinusoidal', 'spherical', 'swirl', 'quaternion Julia roots', 'bulb roots'];
+const SYLLABLES = ['ae', 'bra', 'cy', 'dro', 'el', 'fi', 'glo', 'hy', 'io', 'ka', 'lu', 'mi', 'no', 'or', 'phy', 'qua', 'ri', 'syl', 'tho', 'ur', 've', 'xa', 'yl', 'zo'];
+
+/** A species name and a one-line instruction for the organism, read off its genes. */
+function describe(g: Float32Array): string {
+  let h = 2166136261;
+  for (let m = 0; m < 4; m++) for (const k of [0, 5, 10, 15, 26]) h = Math.imul(h ^ Math.round(g[m * MAP_LEN + k] * 97), 16777619);
+  const pick = (): string => SYLLABLES[(h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0) % SYLLABLES.length];
+  const cap = (w: string): string => w[0].toUpperCase() + w.slice(1);
+  const name = `${cap(pick() + pick() + pick())} ${pick() + pick()}a`;
+  const sum = [0, 0, 0, 0, 0, 0];
+  for (let m = 0; m < 4; m++) for (let k = 0; k < 6; k++) sum[k] += g[m * MAP_LEN + 20 + k];
+  const order = sum.map((v, k) => [v, k]).sort((a, b) => b[0] - a[0]);
+  const sym = Math.round(g[G_SYM_B]);
+  return `${name} · four maps in 4-space, mostly ${VARIATIONS[order[0][1]]} with ${VARIATIONS[order[1][1]]}, ${sym > 1 ? `${sym}-fold symmetry` : 'no symmetry'}`;
+}
 
 /** Column-major 4x4 rotation in the plane of axes (i, j), multiplied into `m`. */
 function rotate4(m: Float32Array, i: number, j: number, a: number): void {
@@ -41,7 +58,7 @@ async function boot(): Promise<void> {
   const query = new URLSearchParams(location.search);
   const mobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 760;
   // The seed pool is the upper bound of dots per frame: 4 bytes per dot.
-  const capacity = Number(query.get('dots')) || (mobile ? 700_000 : 3_000_000);
+  const capacity = Number(query.get('dots')) || (mobile ? 800_000 : 4_000_000);
   let renderer: Renderer;
   let engine: Engine;
   try {
@@ -96,7 +113,7 @@ async function boot(): Promise<void> {
   {
     const host = $('sliders');
     const groups = new Map<string, HTMLDetailsElement>();
-    const openGroups = new Set(mobile ? ['Life'] : ['Life', 'Space', 'Dots', 'Colour']);
+    const openGroups = new Set(mobile ? ['Life'] : ['Life', 'Motion', 'Form', 'Colour']);
     for (const p of engine.params) {
       let g = groups.get(p.group);
       if (!g) {
@@ -303,30 +320,35 @@ async function boot(): Promise<void> {
   const pointers = new Map<number, { x: number; y: number }>();
   const rot4 = identity();
   const view = identity();
-  const angle4 = [0, 0, 0];
   const camCols = new Float32Array([0.9, 0.3, 0.2, 0.2, 0.8, 0.6, 0.3, 0.4, 1.0]);
   const uB = new Float32Array(16);
   const uV = new Float32Array(16);
-  const uCP = new Float32Array(16);
+  const uV2 = new Float32Array(16);
   const uA = new Float32Array(64);
   const uPal = new Float32Array(12);
-  let spin = 0;
-  let hueClock = 0;
+  let phase = 0; // the loop phase: every clock in the piece is an integer multiple of it
   let camTimer = 0;
   let quakeTimer = 4;
   let pulse = 0;
   let lastGeneration = 0;
+  let instruction = '';
+  // slow followers, so nothing the senses or the sliders do can make the picture jump
+  const ease = { bass: 0, mid: 0, high: 0, wind: 0, warmth: 0.5 };
 
   /** Advance the organism by `dt` seconds and describe the frame to draw. */
   const compose = (now: number, dt: number): Frame => {
     audio.update();
     const react = val('react') * 1.6;
-    const bass = clamp(audio.bands.bass * react);
-    const mid = clamp(audio.bands.mid * react);
-    const high = clamp(audio.bands.high * react);
+    const follow = 1 - Math.exp(-dt * 3);
+    ease.bass += (clamp(audio.bands.bass * react) - ease.bass) * follow;
+    ease.mid += (clamp(audio.bands.mid * react) - ease.mid) * follow;
+    ease.high += (clamp(audio.bands.high * react) - ease.high) * follow;
+    ease.wind += ((earth.on ? earth.wind * val('earth') : 0) - ease.wind) * (1 - Math.exp(-dt * 0.3));
+    ease.warmth += ((earth.on ? earth.warmth : 0.5) - ease.warmth) * (1 - Math.exp(-dt * 0.3));
+    const { bass, mid } = ease;
 
     // Impulses from the world: a loud beat or an earthquake make the next generation mutate harder.
-    let kick = audio.micOn && bass > 0.75 ? dt * 0.6 : 0;
+    let kick = audio.micOn && audio.bands.bass * react > 0.75 ? dt * 0.6 : 0;
     quakeTimer -= dt;
     if (earth.on && quakeTimer <= 0) {
       const q = earth.next();
@@ -337,91 +359,106 @@ async function boot(): Promise<void> {
         pulse = Math.max(pulse, strength);
       }
     }
-    pulse *= Math.exp(-dt * 1.2);
+    pulse *= Math.exp(-dt * 0.8);
 
-    genome.set(engine.evolve(dt, clamp(kick)));
+    // One loop: 10 seconds to 5 minutes. Wind from the Earth feed makes time itself run faster.
+    const loopSeconds = 10 + Math.pow(val('loop'), 2) * 290;
+    phase = (phase + (dt * TAU * (1 + ease.wind)) / loopSeconds) % TAU;
+
+    genome.set(engine.evolve(dt, clamp(kick), phase));
     const info = engine.info();
-    if (info.born) {
+    if (info.born || !instruction) {
       loveBtn.classList.remove('on');
-      // every birth rings a note chosen by the newborn's genes
-      if (info.generation !== lastGeneration) audio.post({ t: 'on', n: Math.round(Math.abs(genome[24]) * 12), v: 0.5 });
-      window.setTimeout(() => audio.post({ t: 'off', n: Math.round(Math.abs(genome[24]) * 12) }), 900);
+      instruction = describe(genome);
+      if (info.generation !== lastGeneration && lastGeneration) {
+        // every birth rings a note chosen by the newborn's genes
+        const note = Math.round(Math.abs(genome[26]) * 12);
+        audio.post({ t: 'on', n: note, v: 0.5 });
+        window.setTimeout(() => audio.post({ t: 'off', n: note }), 900);
+      }
       lastGeneration = info.generation;
     }
 
     // genome -> uniforms
     let total = 0;
-    for (let m = 0; m < 4; m++) total += genome[m * MAP_LEN + 25];
+    for (let m = 0; m < 4; m++) total += genome[m * MAP_LEN + 27];
     let accP = 0;
     for (let m = 0; m < 4; m++) {
       const o = m * MAP_LEN;
       uA.set(genome.subarray(o, o + 16), m * 16);
       uB.set(genome.subarray(o + 16, o + 20), m * 4);
       uV.set(genome.subarray(o + 20, o + 24), m * 4);
-      accP += genome[o + 25] / total;
-      uCP[m * 4] = genome[o + 24];
-      uCP[m * 4 + 1] = m === 3 ? 2 : accP;
+      accP += genome[o + 27] / total;
+      uV2[m * 4] = genome[o + 24];
+      uV2[m * 4 + 1] = genome[o + 25];
+      uV2[m * 4 + 2] = genome[o + 26];
+      uV2[m * 4 + 3] = m === 3 ? 2 : accP;
     }
     uPal.set(genome.subarray(G_PAL, G_PAL + 12));
     const psy = val('psy');
-    const windy = earth.on ? earth.wind * val('earth') : 0;
     // psychedelia multiplies how many colour bands wrap around the form
-    for (let k = 6; k < 9; k++) uPal[k] *= 0.6 + psy * 2.4;
-    if (earth.on) {
-      // warm air reddens the palette, cold air blues it
-      const w = (earth.warmth - 0.5) * 0.25 * val('earth');
-      uPal[0] += w;
-      uPal[2] -= w;
-    }
+    for (let k = 6; k < 9; k++) uPal[k] *= 0.5 + psy * 2.2;
+    // warm air reddens the palette, cold air blues it
+    const warm = (ease.warmth - 0.5) * 0.25 * val('earth');
+    uPal[0] += warm;
+    uPal[2] -= warm;
     const symSel = Math.round(val('symmetry') * 8);
-    const sym = symSel > 0 ? symSel : genome[G_SYM];
+    const symA = symSel > 0 ? symSel : genome[G_SYM];
+    const symB = symSel > 0 ? symSel : genome[G_SYM_B];
 
-    // rotation in the three planes that involve the 4th axis: evolved speeds, the slider, wind and tilt
-    const dim = val('dim');
-    const rate = dim * dim * 1.6 * (1 + windy * 2 + mid);
-    for (let k = 0; k < 3; k++) angle4[k] += dt * rate * (0.25 + 0.5 * genome[G_ROT + k]);
+    // Rotation in the three planes that involve the 4th axis: a whole number of turns per
+    // loop in each (the count is inherited), so the form returns exactly to where it began.
+    const turns4 = Math.round(val('dim') * 3);
     rot4.set(identity());
-    rotate4(rot4, 0, 3, angle4[0] + tilt[0]);
-    rotate4(rot4, 1, 3, angle4[1] + tilt[1]);
-    rotate4(rot4, 2, 3, angle4[2]);
-    if (!pointers.size) spin += dt * val('orbit') * 0.6;
+    for (let k = 0; k < 3; k++) {
+      const n = turns4 === 0 ? 0 : Math.max(-turns4, Math.min(turns4, Math.round(genome[G_ROT + k] * 2) || (k === 0 ? 1 : 0)));
+      rotate4(rot4, k, 3, n * phase + (k < 2 ? tilt[k] : 0));
+    }
+    // The camera makes whole turns per loop too, nods and breathes in and out.
+    const turns = Math.round(val('orbit') * 3);
     view.set(identity());
-    rotate4(view, 0, 2, yaw + spin);
-    rotate4(view, 1, 2, pitch);
+    rotate4(view, 0, 2, yaw + turns * phase);
+    rotate4(view, 1, 2, pitch + 0.22 * Math.sin(phase));
+    const zoom = val('zoom');
+    const dist = (5.2 - zoom * 3.9) * (1 + 0.1 * Math.sin(phase * 2));
 
     if (media.camOn && (camTimer -= dt) <= 0) {
       camTimer = 0.25;
       const c = media.colours();
-      if (c) for (let i = 0; i < 9; i++) camCols[i] += (c[i] - camCols[i]) * 0.4;
+      if (c) for (let i = 0; i < 9; i++) camCols[i] += (c[i] - camCols[i]) * 0.25;
     }
 
-    hueClock += dt * (0.01 + psy * psy * 0.35) * (1 + high);
-    const zoom = val('zoom');
     const soft = val('soft');
-    const trails = val('trails');
+    const route = Math.round(val('fxroute'));
     return {
       dots: {
         uA,
         uB,
         uV,
-        uCP,
-        uSym: [sym, genome[G_SYM + 1], 0, 0],
+        uV2,
+        uSym: [symA, genome[G_SYM + 1], 0, 0],
+        uSymB: [symB, genome[G_SYM_B + 1], genome[G_SYM_B + 2], 0],
         uRot4: rot4,
         uView: view,
-        uProj: [1.9, 5.6 - zoom * 4.2, genome[G_PERSP] * (0.3 + dim * 0.9), 1],
-        uPal,
-        uCam: camCols,
+        // a short lens close to the form: strong perspective, so near parts loom and far parts recede
+        uProj: [1.45, dist, genome[G_PERSP] * (0.4 + val('dim') * 0.8), 1],
       },
-      size: (0.9 + soft * soft * 9) * (1 + bass * 0.8 + pulse * 1.5),
-      dof: soft * 0.9,
+      look: { uPal, uCam: camCols },
+      size: (0.75 + soft * soft * 9) * (1 + bass * 0.5 + pulse),
+      dof: soft * 0.8,
       gain: 1,
       glow: val('glow') * (1 + bass + pulse * 2),
-      hue: val('hue') + hueClock,
-      spread: 0.7 + psy * 1.6,
-      camMix: media.camOn ? val('camcol') : 0,
-      tone: [9 + psy * 20, 0.34 + bass * 0.12 + pulse * 0.2, 1.25 + psy * 0.9, 0],
-      // feedback: persistence, zoom, twist, colour cycle (the last three grow with psychedelia)
-      fb: [trails * 0.97, psy * 0.012 * (1 + bass * 2), (psy - 0.3) * 0.02, psy * psy * 0.25],
+      solid: val('solid'),
+      smooth: val('smooth'),
+      phase,
+      fx: [val('kaleido'), val('twist'), val('wave'), val('lattice')],
+      route,
+      tone: [10 + psy * 18, 0.36 + bass * 0.08 + pulse * 0.15, 1.2 + psy * 0.9, val('depth')],
+      // echo feedback: persistence, zoom, twist, colour cycle (the last three grow with psychedelia)
+      fb: [val('trails') * 0.985, psy * 0.012 * (1 + bass * 2), (psy - 0.3) * 0.02, psy * psy * 0.22],
+      // the palette turns a whole number of times per loop
+      colr: [val('hue') + (Math.round(psy * 4) * phase) / TAU + mid * 0.05, 0.7 + psy * 1.5, media.camOn ? val('camcol') : 0],
+      fxc: [val('spectrum'), val('contour'), val('poster')],
       bright: Math.pow(2, (val('brightness') - 0.5) * 3),
       time: now / 1000,
     };
@@ -432,9 +469,10 @@ async function boot(): Promise<void> {
   const nextFrame = (): Promise<void> => new Promise((r) => requestAnimationFrame(() => r()));
 
   /**
-   * Render the current form `width` pixels wide and save it as PNG. Each tile gets many
-   * passes of fresh dots (hundreds of millions in total on a desktop GPU) and is streamed
-   * straight into the encoder, so the full image never sits in memory.
+   * Render the current form `width` pixels wide and save it as PNG. The image is built
+   * from tiles; each tile gets many passes of fresh dots and is streamed into the encoder
+   * in thin strips, so neither the GPU nor the page ever holds the whole picture. That is
+   * what makes 16K (132 megapixels) possible in a browser.
    */
   const still = async (width: number): Promise<void> => {
     if (busy || !renderer.ready) return;
@@ -442,39 +480,50 @@ async function boot(): Promise<void> {
     busy = true;
     const W = width;
     const H = Math.max(2, Math.round((W * canvas.clientHeight) / Math.max(1, canvas.clientWidth)));
-    // Enough dots for the pixel count: about 1.5 per pixel on desktop, fewer on phones.
-    const want = W * H * (mobile ? 0.25 : 1.5);
+    const margin = renderer.margin(H);
+    // big tiles mean the swarm is drawn fewer times; small ones fit weak GPUs
+    const T = Number(query.get('tile')) || (!mobile && renderer.maxSize >= 4096 ? 2048 : Math.min(1024, renderer.maxSize - 2 * margin));
+    // enough dots for the pixel count, within reason for the device
+    const want = Math.min(W * H * 0.6, mobile ? 8e6 : 90e6);
     const keep = renderer.count;
     renderer.count = renderer.capacity;
-    const passes = Math.max(2, Math.min(64, Number(query.get('passes')) || Math.round(want / renderer.count)));
+    const passes = Math.max(2, Math.min(48, Number(query.get('passes')) || Math.round(want / renderer.count)));
     progress.hidden = false;
     const setProgress = (f: number, text: string): void => {
       $('progress-bar').style.width = `${Math.round(f * 100)}%`;
       $('progress-text').textContent = text;
     };
-    const millions = ((passes * renderer.count) / 1e6).toFixed(0);
-    setProgress(0, `Rendering ${W}×${H} from ${millions} million dots…`);
+    const label = `Rendering ${W}×${H} from ${((passes * renderer.count) / 1e6).toFixed(0)} million dots`;
+    setProgress(0, `${label}…`);
     try {
       const frame = compose(performance.now(), 0); // freeze this instant
       await nextFrame();
       const png = new PngStream(W, H);
-      const band = new Uint8Array(W * TILE * 4);
-      const tilePx = new Uint8Array(TILE * TILE * 4);
-      const bands = Math.ceil(H / TILE);
-      const cols = Math.ceil(W / TILE);
+      const STRIP = 128;
+      const strip = new Uint8Array(W * STRIP * 4);
+      const part = new Uint8Array(T * STRIP * 4);
+      const bands = Math.ceil(H / T);
+      const cols = Math.ceil(W / T);
       for (let j = 0; j < bands; j++) {
-        const rows = Math.min(TILE, H - j * TILE);
-        const oy = H - j * TILE - rows;
+        const rows = Math.min(T, H - j * T);
+        const oy = H - j * T - rows;
         for (let i = 0; i < cols; i++) {
-          const ox = i * TILE;
-          const w = Math.min(TILE, W - ox);
           if (renderer.lost) throw new Error('the graphics context was lost');
-          renderer.tile(frame, W, H, ox, oy, TILE, w, rows, passes, tilePx);
-          for (let r = 0; r < rows; r++) band.set(tilePx.subarray(r * w * 4, (r + 1) * w * 4), (r * W + ox) * 4);
-          setProgress((j * cols + i + 1) / (bands * cols), `Rendering ${W}×${H} from ${millions} million dots… ${Math.round(((j * cols + i + 1) / (bands * cols)) * 100)}%`);
+          renderer.tile(frame, W, H, i * T, oy, T, passes, i);
+          const done = (j * cols + i + 1) / (bands * cols);
+          setProgress(done, `${label}… ${Math.round(done * 100)}%`);
           await nextFrame(); // keep the page responsive and the GPU watchdog calm
         }
-        await png.write(band.subarray(0, W * rows * 4), rows);
+        // the row of tiles is complete on the GPU: read it back strip by strip, top first
+        for (let y = rows; y > 0; y -= STRIP) {
+          const h = Math.min(STRIP, y);
+          for (let i = 0; i < cols; i++) {
+            const w = Math.min(T, W - i * T);
+            renderer.readStrip(i, y - h, w, h, part);
+            for (let r = 0; r < h; r++) strip.set(part.subarray(r * w * 4, (r + 1) * w * 4), (r * W + i * T) * 4);
+          }
+          await png.write(strip.subarray(0, W * h * 4), h);
+        }
       }
       setProgress(1, 'Saving…');
       const blob = await png.finish();
@@ -494,8 +543,9 @@ async function boot(): Promise<void> {
       busy = false;
     }
   };
-  $('btn-4k').addEventListener('click', () => void still(Number(query.get('still')) || 3840));
-  $('btn-8k').addEventListener('click', () => void still(Number(query.get('still')) || 7680));
+  for (const [id, width] of [['btn-4k', 3840], ['btn-8k', 7680], ['btn-16k', 15360]] as const) {
+    $(id).addEventListener('click', () => void still(Number(query.get('still')) || width));
+  }
 
   // ------------------------------------------------------------------ keyboard
   const typing = (e: KeyboardEvent): boolean => {
@@ -638,7 +688,7 @@ async function boot(): Promise<void> {
     const dots = renderer.count >= 1e6 ? `${(renderer.count / 1e6).toFixed(1)}M` : `${Math.round(renderer.count / 1000)}k`;
     stat.textContent = `${Math.round(fps)} fps · ${dots} dots · ${sw}×${sh} → ${canvas.width}×${canvas.height}`;
     const info = engine.info();
-    statusEl.textContent = `Generation ${info.generation} · fitness ${info.fitness.toFixed(2)} · pool ${info.poolFitness.toFixed(2)}${info.loved ? ` · ♥ ${info.loved}` : ''}${earth.status ? `\n${earth.status}` : ''}`;
+    statusEl.textContent = `${instruction}\nGeneration ${info.generation} · ${Math.round(info.progress * 100)}% grown · fitness ${info.fitness.toFixed(2)}${info.loved ? ` · ♥ ${info.loved}` : ''}${earth.status ? `\n${earth.status}` : ''}`;
   };
   requestAnimationFrame(frame);
 }

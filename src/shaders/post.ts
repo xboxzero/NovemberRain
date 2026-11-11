@@ -14,29 +14,106 @@ precision mediump float;
 #endif
 `;
 
-// Develops the accumulated dots like a fractal flame: brightness is the logarithm
-// of the density, colour is the average colour of the dots that landed there.
-// Then the feedback loop: the previous frame, zoomed, twisted and colour-cycled.
+// Plain copy, used to blend each frame's dots into the running average.
+export const COPY = PRECISION + /* glsl */ `
+varying vec2 vUv;
+uniform sampler2D uTex;
+void main() { gl_FragColor = texture2D(uTex, vUv); }`;
+
+// Development. The buffer holds, per pixel, sums over the dots that landed there of
+// (palette index, depth, 1, radius) x energy. From it we recover:
+//   * density  -> brightness on a logarithmic scale, as in a fractal flame;
+//   * mean palette index and radius -> colour;
+//   * mean depth -> a surface normal (screen-space gradient), from which the swarm
+//     is lit, given ambient occlusion and depth haze: this is what makes it read
+//     as a body in space instead of a flat picture.
+// Then the colour effects (serial or parallel) and the echo feedback loop.
 export const DEVELOP = PRECISION + /* glsl */ `
 varying vec2 vUv;
 uniform sampler2D uAcc, uPrev;
-uniform vec4 uTone;   // exposure, gain, saturation boost, low-dynamic-range flag
-uniform vec4 uFb;     // persistence, zoom, twist, colour cycle
+uniform vec2 uOff;      // sampling radius for normals, in uv
+uniform vec4 uTone;     // exposure, gain, saturation, 3D light amount
+uniform vec4 uFb;       // persistence, zoom, twist, colour cycle
+uniform vec4 uColr;     // palette phase shift, palette spread, camera palette mix, loop phase
+uniform vec4 uFxC;      // spectrum, contours, posterize, routing
+uniform vec3 uPal[4];   // cosine palette: offset, amplitude, frequency, phase
+uniform vec3 uCam[3];   // colours sampled from the camera
 uniform float uAsp;
 
+#define TAU 6.2831853
 vec3 hueRot(vec3 c, float a) {
   const vec3 k = vec3(.57735);
   float ca = cos(a), sa = sin(a);
   return c * ca + cross(k, c) * sa + k * dot(k, c) * (1. - ca);
 }
+vec3 palette(float t) {
+  vec3 col = uPal[0] + uPal[1] * cos(TAU * (uPal[2] * t + uPal[3] + uColr.x));
+  if (uColr.z > .003) {
+    float u = fract(t + uColr.x) * 2.;
+    vec3 cam = u < 1. ? mix(uCam[0], uCam[1], u) : mix(uCam[1], uCam[2], u - 1.);
+    col = mix(col, cam * 1.3 + .05, uColr.z);
+  }
+  return max(col, 0.);
+}
+float depthAt(vec2 uv, float fallback) {
+  vec4 s = texture2D(uAcc, uv);
+  return s.b > 1e-5 ? s.g / s.b : fallback;
+}
+vec3 fxSpectrum(float l, float z) {
+  // density and depth read as a spectrum: equal densities share a colour
+  return (.5 + .5 * cos(TAU * (l * 2.2 + z * 1.5 + uColr.w / TAU + vec3(0., .33, .67)))) * (.25 + l);
+}
+vec3 fxContour(vec3 c, float z, float l) {
+  // contour lines of equal depth, like a survey map of the form
+  float line = smoothstep(.12, 0., abs(fract(z * 26. + uColr.w / TAU * 2.) - .5) - .04);
+  return c * .25 + (.5 + .5 * cos(TAU * (z * 3. + vec3(.0, .2, .45)))) * line * min(l * 1.5, 1.2);
+}
+vec3 fxPoster(vec3 c) {
+  vec3 q = floor(c * 4. + .5) / 4.;
+  return mix(q, abs(sin(q * 3.14159 * 1.5)), .5);
+}
 
 void main() {
   vec4 a = texture2D(uAcc, vUv);
-  float d = a.a;
+  float e = a.b;
   vec3 col = vec3(0.);
-  if (d > 1e-6) {
-    float l = log(1. + d * uTone.x) * uTone.y;
-    col = a.rgb / d * l;
+  if (e > 1e-5) {
+    float c = a.r / e, z = a.g / e, rad = a.a / e;
+    float l = log(1. + e * uTone.x) * uTone.y;
+    vec3 base = palette(c * uColr.y + rad * .22);
+
+    // surface normal from the gradient of the mean depth
+    float zx = depthAt(vUv + vec2(uOff.x, 0.), z) - depthAt(vUv - vec2(uOff.x, 0.), z);
+    float zy = depthAt(vUv + vec2(0., uOff.y), z) - depthAt(vUv - vec2(0., uOff.y), z);
+    vec3 n = normalize(vec3(-zx, -zy, .012));
+    vec3 L = normalize(vec3(-.5, .62, .6));
+    float diff = dot(n, L) * .5 + .5;
+    float spec = pow(max(dot(n, normalize(L + vec3(0., 0., 1.))), 0.), 28.);
+    // ambient occlusion: darker where the neighbourhood is nearer than this point
+    float ao = 0.;
+    vec2 r = uOff * 4.5;
+    ao += clamp((z - depthAt(vUv + r, z)) * 16., 0., 1.);
+    ao += clamp((z - depthAt(vUv - r, z)) * 16., 0., 1.);
+    ao += clamp((z - depthAt(vUv + vec2(r.x, -r.y), z)) * 16., 0., 1.);
+    ao += clamp((z - depthAt(vUv + vec2(-r.x, r.y), z)) * 16., 0., 1.);
+    float shade = (.3 + 1.05 * diff * diff) * (1. - .16 * ao) * (1.35 - .95 * z);   // near is bright, far sinks into haze
+    float k3 = uTone.w;
+    col = base * l * mix(1., shade, k3) + vec3(1., .95, .85) * spec * l * .5 * k3;
+
+    // colour effects, in series or in parallel
+    if (uFxC.w < .5) {
+      if (uFxC.x > .003) col = mix(col, fxSpectrum(l, z) * mix(1., shade, k3), uFxC.x);
+      if (uFxC.y > .003) col = mix(col, fxContour(col, z, l), uFxC.y);
+      if (uFxC.z > .003) col = mix(col, fxPoster(col), uFxC.z);
+    } else {
+      vec3 dry = col;
+      float w = 1.;
+      if (uFxC.x > .003) { col += fxSpectrum(l, z) * mix(1., shade, k3) * uFxC.x * 1.5; w += uFxC.x * 1.5; }
+      if (uFxC.y > .003) { col += fxContour(dry, z, l) * uFxC.y * 1.5; w += uFxC.y * 1.5; }
+      if (uFxC.z > .003) { col += fxPoster(dry) * uFxC.z * 1.5; w += uFxC.z * 1.5; }
+      col /= mix(w, sqrt(w), .5);
+    }
+
     float m = dot(col, vec3(.333));
     col = max(mix(vec3(m), col, uTone.z), 0.);
     col = col / (1. + col * .35);          // soft shoulder instead of clipping
@@ -49,8 +126,7 @@ void main() {
     p.x /= uAsp;
     vec3 prev = texture2D(uPrev, p + .5).rgb;
     if (uFb.w > .001) prev = max(hueRot(prev, uFb.w), 0.);
-    // blend toward the running average (denser, calmer image) and keep bright echoes
-    col = max(mix(col, prev, uFb.x * .6), prev * uFb.x * .985);
+    col = max(col, prev * uFb.x);
   }
   gl_FragColor = vec4(clamp(col, 0., 1.), 1.);
 }`;
@@ -81,6 +157,6 @@ void main() {
   vec2 fuv = uTile.xy + vUv * uTile.zw;
   vec2 v = fuv - .5;
   col *= 1. - dot(v, v) * .5;
-  col += (h21(floor(fuv * uOut) + fract(uTime) * 91.) - .5) * .01;
+  col += (h21(floor(fuv * uOut) + fract(uTime) * 91.) - .5) * .008;
   gl_FragColor = vec4(clamp(col, 0., 1.), 1.);
 }`;

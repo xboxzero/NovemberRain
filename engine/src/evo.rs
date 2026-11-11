@@ -3,27 +3,43 @@
 //!
 //! An organism is an iterated function system in four dimensions: four maps,
 //! each an affine transform of (x, y, z, w) followed by a blend of non-linear
-//! variations, plus a rotational symmetry and a colour palette. Its genome is a
-//! flat array of floats which the GPU reads directly as uniforms.
+//! variations. Besides the classic flame variations (linear, sinusoidal,
+//! spherical, swirl) two come straight from 3D/4D fractal mathematics:
+//!   * the quaternion square root, i.e. an inverse branch of the quaternion
+//!     Julia map q -> q^2 + c (Norton, 1982): iterating inverse branches at
+//!     random draws the Julia set itself, a true four-dimensional fractal;
+//!   * the "bulb root": the inverse of the Mandelbulb's spherical-coordinate
+//!     squaring (White and Nylander), halving the angles and rooting the radius.
+//! Its genome is a flat array of floats which the GPU reads as uniforms.
 //!
 //! Evolution is steady-state: two parents are chosen by tournament, crossed
 //! over map by map, mutated with Gaussian noise, and the child is scored by an
-//! automatic fitness function that samples the attractor on the CPU and rewards
-//! shapes that are bounded, neither collapsed nor a formless cloud, genuinely
-//! four-dimensional and fractal (box-counting dimension near 2). The viewer can
-//! bias selection by loving or skipping what is on screen. The picture morphs
-//! continuously from each parent generation to the next.
+//! automatic fitness function that samples the attractor on the CPU. The viewer
+//! biases selection by loving or skipping what is on screen (aesthetic
+//! selection, after Latham's Mutator, Sims and Draves' Electric Sheep).
+//!
+//! Motion: every organism also moves by itself. Its maps rotate and slide along
+//! closed curves driven by a single loop phase with integer harmonics, so the
+//! motion is real change of the fractal (not a camera move) and repeats
+//! seamlessly. Generations morph into one another slowly on top of that.
 
 use crate::rng::Rng;
 
 pub const MAPS: usize = 4;
-const MAP_LEN: usize = 26; // 16 matrix (column-major) + 4 translation + 4 variation weights + colour + probability
+const MAP_LEN: usize = 28; // 16 matrix (column-major) + 4 translation + 6 variation weights + colour + probability
+const NVAR: usize = 6;
+const M_COL: usize = 26;
+const M_PROB: usize = 27;
 const G_SYM: usize = MAPS * MAP_LEN;
 const G_SYMZW: usize = G_SYM + 1;
 const G_PAL: usize = G_SYM + 2; // 12 floats: offset, amplitude, frequency, phase (rgb each)
 const G_ROT: usize = G_PAL + 12; // 3 rotation speeds in the xw, yw, zw planes
 const G_PERSP: usize = G_ROT + 3;
-pub const GLEN: usize = 124;
+const G_SYM_B: usize = G_PERSP + 1; // symmetry of the generation being approached
+const G_SYMZW_B: usize = G_PERSP + 2;
+const G_SYM_MIX: usize = G_PERSP + 3; // share of dots that already follow it
+pub const GLEN: usize = 136;
+const PLANES: [(usize, usize); 6] = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
 const POP: usize = 10;
 const TAU: f32 = core::f32::consts::PI * 2.0;
 
@@ -47,21 +63,23 @@ fn random_genome(rng: &mut Rng) -> Genome {
         for k in 0..4 {
             g[o + k * 4 + k] = rng.range(0.38, 0.88);
         }
-        for (i, j) in [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)] {
+        for (i, j) in PLANES {
             rot_plane(&mut g[o..o + 16], i, j, rng.s() * 3.1416);
         }
         for k in 0..4 {
             g[o + 16 + k] = rng.s() * 0.9;
         }
-        // variation weights: linear, sinusoidal, spherical, swirl
-        let kind = rng.next() % 5;
-        let mut v = [rng.f() * 0.6 + 0.2, rng.f() * 0.5, rng.f() * 0.4, rng.f() * 0.4];
-        if kind < 4 {
-            v[kind as usize] += 0.8;
+        // variation weights: linear, sinusoidal, spherical, swirl, quaternion Julia root, bulb root
+        let kind = rng.next() % 8;
+        let mut v = [rng.f() * 0.5 + 0.15, rng.f() * 0.4, rng.f() * 0.3, rng.f() * 0.3, rng.f() * 0.3, rng.f() * 0.3];
+        if kind < 6 {
+            v[kind as usize] += 0.9;
+        } else {
+            v[4 + (kind as usize - 6)] += 1.4; // favour the genuinely 3D/4D maps
         }
-        g[o + 20..o + 24].copy_from_slice(&v);
-        g[o + 24] = rng.f();
-        g[o + 25] = rng.range(0.5, 1.5);
+        g[o + 20..o + 20 + NVAR].copy_from_slice(&v);
+        g[o + M_COL] = rng.f();
+        g[o + M_PROB] = rng.range(0.5, 1.5);
     }
     g[G_SYM] = [1.0, 1.0, 2.0, 3.0, 3.0, 4.0, 5.0, 6.0, 8.0][(rng.next() % 9) as usize];
     g[G_SYMZW] = (rng.next() % 3) as f32;
@@ -90,7 +108,7 @@ fn repair(g: &mut Genome) {
             *v = v.clamp(-1.6, 1.6);
         }
         let mut sum = 0.0;
-        for v in g[o + 20..o + 24].iter_mut() {
+        for v in g[o + 20..o + 20 + NVAR].iter_mut() {
             *v = v.max(0.0);
             sum += *v;
         }
@@ -98,11 +116,11 @@ fn repair(g: &mut Genome) {
             g[o + 20] = 1.0;
             sum = 1.0;
         }
-        for v in g[o + 20..o + 24].iter_mut() {
+        for v in g[o + 20..o + 20 + NVAR].iter_mut() {
             *v /= sum;
         }
-        g[o + 24] = g[o + 24].rem_euclid(1.0);
-        g[o + 25] = g[o + 25].clamp(0.2, 2.0);
+        g[o + M_COL] = g[o + M_COL].rem_euclid(1.0);
+        g[o + M_PROB] = g[o + M_PROB].clamp(0.2, 2.0);
     }
     g[G_SYM] = g[G_SYM].round().clamp(1.0, 8.0);
     g[G_SYMZW] = g[G_SYMZW].round().clamp(0.0, 2.0);
@@ -125,13 +143,26 @@ fn apply(g: &Genome, m: usize, p: [f32; 4], h: f32) -> [f32; 4] {
         q[r] = a[r] * p[0] + a[4 + r] * p[1] + a[8 + r] * p[2] + a[12 + r] * p[3] + g[o + 16 + r];
     }
     let r2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3] + 1e-4;
-    let v = &g[o + 20..o + 24];
+    let v = &g[o + 20..o + 20 + NVAR];
     let (s, c) = r2.sin_cos();
     let sw = [q[0] * s - q[1] * c, q[0] * c + q[1] * s, q[2] * s - q[3] * c, q[2] * c + q[3] * s];
     let inv = 1.0 / r2.max(0.06);
+    // quaternion square root with a random sign: an inverse branch of the Julia map
+    let n = r2.sqrt();
+    let vn = (q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt() + 1e-6;
+    let sg = if (h * 7.13).fract() < 0.5 { 1.0 } else { -1.0 };
+    let re = ((n + q[0]) * 0.5).max(0.0).sqrt() * sg;
+    let im = ((n - q[0]) * 0.5).max(0.0).sqrt() / vn * sg;
+    let jr = [re, q[1] * im, q[2] * im, q[3] * im];
+    // bulb root: halve the spherical angles, root the radius
+    let r3 = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt() + 1e-6;
+    let th = (q[2] / r3).clamp(-1.0, 1.0).acos() * 0.5;
+    let ph = q[1].atan2(q[0]) * 0.5 + if (h * 13.7).fract() < 0.5 { 0.0 } else { core::f32::consts::PI };
+    let rr = r3.sqrt();
+    let bulb = [rr * th.sin() * ph.cos(), rr * th.sin() * ph.sin(), rr * th.cos(), q[3] * 0.7];
     let mut f = [0.0f32; 4];
     for r in 0..4 {
-        f[r] = v[0] * q[r] + v[1] * (q[r] * 2.0).sin() + v[2] * q[r] * inv + v[3] * sw[r];
+        f[r] = v[0] * q[r] + v[1] * (q[r] * 2.0).sin() + v[2] * q[r] * inv + v[3] * sw[r] + v[4] * jr[r] + v[5] * bulb[r];
     }
     let k = 1.0 / (1.0 + 0.03 * (f[0] * f[0] + f[1] * f[1] + f[2] * f[2] + f[3] * f[3]));
     // rotational symmetry in the xy plane, coupled to the zw plane
@@ -143,15 +174,47 @@ fn apply(g: &Genome, m: usize, p: [f32; 4], h: f32) -> [f32; 4] {
 }
 
 fn pick_map(g: &Genome, r: f32) -> usize {
-    let total: f32 = (0..MAPS).map(|m| g[m * MAP_LEN + 25]).sum();
+    let total: f32 = (0..MAPS).map(|m| g[m * MAP_LEN + M_PROB]).sum();
     let mut acc = 0.0;
     for m in 0..MAPS {
-        acc += g[m * MAP_LEN + 25] / total;
+        acc += g[m * MAP_LEN + M_PROB] / total;
         if r < acc {
             return m;
         }
     }
     MAPS - 1
+}
+
+/// The organism's own motion: its maps rotate and slide along closed curves of the
+/// loop `phase` (0..TAU). Every term uses an integer harmonic, so phase 0 and TAU
+/// give exactly the same fractal and the animation loops without a seam.
+fn animate(g: &Genome, phase: f32, motion: f32) -> Genome {
+    let mut o = *g;
+    if motion < 0.002 {
+        return o;
+    }
+    for m in 0..MAPS {
+        let b = m * MAP_LEN;
+        let c = g[b + M_COL];
+        // which planes turn, how often and in what phase is itself inherited (derived from a gene)
+        let h = |k: f32| (c * k + m as f32 * 0.37).fract();
+        let p1 = PLANES[(m * 2 + (h(7.3) * 6.0) as usize) % 6];
+        let p2 = PLANES[(m * 2 + 3 + (h(11.1) * 6.0) as usize) % 6];
+        let a1 = motion * 0.9 * (phase * (1.0 + (h(3.7) * 2.0).floor()) + TAU * h(5.9)).sin();
+        let a2 = motion * 0.6 * (phase * (1.0 + (h(9.1) * 3.0).floor()) + TAU * h(2.3)).sin();
+        rot_plane(&mut o[b..b + 16], p1.0, p1.1, a1);
+        rot_plane(&mut o[b..b + 16], p2.0, p2.1, a2);
+        if m == 0 {
+            // one map makes a complete revolution per loop: the form turns itself inside out and returns
+            let p3 = PLANES[(h(13.3) * 6.0) as usize % 6];
+            rot_plane(&mut o[b..b + 16], p3.0, p3.1, phase * motion.min(1.0).ceil());
+        }
+        for i in 0..4 {
+            let harmonic = 1.0 + ((i + m) % 2) as f32;
+            o[b + 16 + i] += motion * 0.3 * (phase * harmonic + TAU * h(1.7 + i as f32)).sin();
+        }
+    }
+    o
 }
 
 /// Automatic aesthetic fitness in 0..1, from a CPU sample of the attractor.
@@ -243,26 +306,32 @@ pub struct Evolution {
     pub io: Genome,
     kick: f32,
     hurry: bool,
+    pending: Option<usize>,
 }
 
 impl Evolution {
     pub fn new(seed: u32) -> Self {
         let mut rng = Rng::new(seed ^ 0x0E70_1F3D);
-        // Seed the gene pool: sample many random organisms, keep the fittest.
+        let pop = Self::seed_pool(&mut rng);
+        let from = pop[0].g;
+        let to = pop[1].g;
+        let mut e = Evolution { rng, pop, from, to, to_index: 1, t: 0.0, out: from, generation: 1, info: [0.0; 6], io: from, kick: 0.0, hurry: false, pending: None };
+        e.write_info(false);
+        e
+    }
+
+    /// Sample many random organisms and keep the fittest as the founding gene pool.
+    fn seed_pool(rng: &mut Rng) -> Vec<Member> {
         let mut cands: Vec<Member> = (0..48)
             .map(|_| {
-                let g = random_genome(&mut rng);
-                let fit = fitness(&g, &mut rng);
+                let g = random_genome(rng);
+                let fit = fitness(&g, rng);
                 Member { g, fit, loved: false }
             })
             .collect();
         cands.sort_by(|a, b| b.fit.partial_cmp(&a.fit).unwrap_or(core::cmp::Ordering::Equal));
         cands.truncate(POP);
-        let from = cands[0].g;
-        let to = cands[1].g;
-        let mut e = Evolution { rng, pop: cands, from, to, to_index: 1, t: 0.0, out: from, generation: 1, info: [0.0; 6], io: from, kick: 0.0, hurry: false };
-        e.write_info(false);
-        e
+        cands
     }
 
     fn tournament(&mut self) -> usize {
@@ -300,6 +369,7 @@ impl Evolution {
             }
             // Gaussian mutation
             for (i, v) in c.iter_mut().enumerate().take(G_PERSP + 1) {
+                // (the genes after G_PERSP are display-only and never evolve)
                 if i == G_SYM || i == G_SYMZW {
                     continue;
                 }
@@ -329,21 +399,27 @@ impl Evolution {
     }
 
     fn next_generation(&mut self, mutation: f32) {
-        let (child, fit) = self.breed((mutation + self.kick).min(1.0));
-        self.kick = 0.0;
-        // steady-state replacement: the child takes the place of the weakest unloved member
-        let mut worst = 0;
-        let mut wf = f32::MAX;
-        for (i, m) in self.pop.iter().enumerate() {
-            if !m.loved && i != self.to_index && m.fit < wf {
-                wf = m.fit;
-                worst = i;
+        self.from = self.to;
+        if let Some(slot) = self.pending.take() {
+            // a loaded organism or the founder of a fresh pool is next in line
+            self.to = self.pop[slot].g;
+            self.to_index = slot;
+        } else {
+            let (child, fit) = self.breed((mutation + self.kick).min(1.0));
+            // steady-state replacement: the child takes the place of the weakest unloved member
+            let mut worst = 0;
+            let mut wf = f32::MAX;
+            for (i, m) in self.pop.iter().enumerate() {
+                if !m.loved && i != self.to_index && m.fit < wf {
+                    wf = m.fit;
+                    worst = i;
+                }
             }
+            self.pop[worst] = Member { g: child, fit, loved: false };
+            self.to = child;
+            self.to_index = worst;
         }
-        self.pop[worst] = Member { g: child, fit, loved: false };
-        self.from = self.out;
-        self.to = child;
-        self.to_index = worst;
+        self.kick = 0.0;
         self.t = 0.0;
         self.generation += 1;
         self.write_info(true);
@@ -356,27 +432,35 @@ impl Evolution {
     }
 
     /// Advance the morph. `speed` and `mutation` are 0..1; `kick` adds a one-off mutation impulse
-    /// (a loud sound, an earthquake on the feed).
-    pub fn step(&mut self, dt: f32, speed: f32, mutation: f32, kick: f32) {
+    /// (a loud sound, an earthquake on the feed); `phase` is the loop phase in 0..TAU and
+    /// `motion` the amplitude of the organism's own movement.
+    pub fn step(&mut self, dt: f32, speed: f32, mutation: f32, kick: f32, phase: f32, motion: f32) {
         self.kick = (self.kick + kick).min(1.0);
-        let dur = if self.hurry { 1.2 } else { 3.0 + (1.0 - speed).powi(2) * 60.0 };
+        // 15 seconds at full speed, five minutes at the slow end; zero pauses evolution entirely
+        let dur = if self.hurry { 4.0 } else { 15.0 + (1.0 - speed).powi(2) * 300.0 };
         self.info[5] = 0.0;
         if speed > 0.004 || self.hurry {
             self.t += dt.clamp(0.0, 0.2) / dur;
         }
         if self.t >= 1.0 {
             self.hurry = false;
-            self.out = self.to;
             self.next_generation(mutation);
         }
-        let u = self.t * self.t * (3.0 - 2.0 * self.t);
+        // smootherstep: the morph starts and ends with zero velocity and zero acceleration
+        let t = self.t;
+        let u = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+        let a = animate(&self.from, phase, motion);
+        let b = animate(&self.to, phase, motion);
         for i in 0..GLEN {
-            self.out[i] = self.from[i] + (self.to[i] - self.from[i]) * u;
+            self.out[i] = a[i] + (b[i] - a[i]) * u;
         }
-        // discrete genes switch half-way
-        let src = if u < 0.5 { &self.from } else { &self.to };
-        self.out[G_SYM] = src[G_SYM];
-        self.out[G_SYMZW] = src[G_SYMZW];
+        // Discrete genes cannot be interpolated, so they cross-fade through the swarm:
+        // a growing share of the dots follows the new symmetry.
+        self.out[G_SYM] = self.from[G_SYM];
+        self.out[G_SYMZW] = self.from[G_SYMZW];
+        self.out[G_SYM_B] = self.to[G_SYM];
+        self.out[G_SYMZW_B] = self.to[G_SYMZW];
+        self.out[G_SYM_MIX] = u;
         self.info[2] = self.t;
     }
 
@@ -387,7 +471,7 @@ impl Evolution {
         self.write_info(false);
     }
 
-    /// The viewer dislikes it: remove it from the gene pool's favour and move on quickly.
+    /// The viewer dislikes it: it loses its standing in the gene pool and the next generation comes quickly.
     pub fn skip(&mut self) {
         self.pop[self.to_index].loved = false;
         self.pop[self.to_index].fit *= 0.15;
@@ -395,19 +479,16 @@ impl Evolution {
         self.write_info(false);
     }
 
-    /// Replace the whole gene pool with fresh random organisms.
+    /// Replace the whole gene pool with fresh random organisms; the picture morphs to its founder.
     pub fn reseed(&mut self) {
-        let seed = self.rng.next();
-        let gen = self.generation;
-        let out = self.out;
-        *self = Evolution::new(seed);
-        self.from = out;
-        self.generation = gen + 1;
+        self.pop = Self::seed_pool(&mut self.rng);
+        self.to_index = POP - 1;
+        self.pending = Some(0);
         self.hurry = true;
-        self.write_info(true);
+        self.write_info(false);
     }
 
-    /// Adopt the genome in `io` (a loaded preset) as a loved member and morph to it.
+    /// Adopt the genome in `io` (a saved organism) as a loved member and morph to it.
     pub fn adopt(&mut self) {
         let mut g = self.io;
         if g.iter().any(|v| !v.is_finite()) {
@@ -417,12 +498,8 @@ impl Evolution {
         let fit = fitness(&g, &mut self.rng).max(0.5);
         let slot = (self.to_index + 1) % self.pop.len();
         self.pop[slot] = Member { g, fit, loved: true };
-        self.from = self.out;
-        self.to = g;
-        self.to_index = slot;
-        self.t = 0.0;
+        self.pending = Some(slot);
         self.hurry = true;
-        self.generation += 1;
-        self.write_info(true);
+        self.write_info(false);
     }
 }

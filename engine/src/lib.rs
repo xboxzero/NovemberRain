@@ -94,13 +94,14 @@ pub extern "C" fn defaults_ptr() -> *const f32 {
 
 // ---- evolution -----------------------------------------------------------------------
 
-/// Advance the evolving organism and return a pointer to its current (morphing) genome.
+/// Advance the evolving organism and return a pointer to its current (morphing, moving) genome.
+/// `phase` is the loop phase in radians.
 #[no_mangle]
-pub extern "C" fn evolve(dt: f32, kick: f32) -> *const f32 {
+pub extern "C" fn evolve(dt: f32, kick: f32, phase: f32) -> *const f32 {
     let e = eng();
-    let (speed, mutation) = (e.params[params::EVOLVE], e.params[params::MUTATION]);
+    let (speed, mutation, motion) = (e.params[params::EVOLVE], e.params[params::MUTATION], e.params[params::MOTION]);
     let ev = e.evo();
-    ev.step(dt, speed, mutation, kick.clamp(0.0, 1.0));
+    ev.step(dt, speed, mutation, kick.clamp(0.0, 1.0), phase, motion);
     ev.out.as_ptr()
 }
 

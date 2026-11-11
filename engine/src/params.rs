@@ -31,18 +31,32 @@ table! {
     MUTATION = "mutation", "Mutation", "Life", 0.4, [];
     SYMMETRY = "symmetry", "Symmetry", "Life", 0.0, ["Evolved", "1", "2", "3", "4", "5", "6", "7", "8"];
 
-    DIM = "dim", "4th dimension", "Space", 0.5, [];
-    ORBIT = "orbit", "Spin", "Space", 0.3, [];
-    ZOOM = "zoom", "Zoom", "Space", 0.5, [];
+    MOTION = "motion", "Inner motion", "Motion", 0.55, [];
+    LOOP = "loop", "Loop length", "Motion", 0.42, [];
+    DIM = "dim", "4D turns per loop", "Motion", 0.34, [];
+    ORBIT = "orbit", "Camera turns per loop", "Motion", 0.34, [];
+    ZOOM = "zoom", "Zoom", "Motion", 0.62, [];
 
-    DOTS = "dots", "Dots", "Dots", 0.7, [];
-    SOFT = "soft", "Softness", "Dots", 0.35, [];
-    GLOW = "glow", "Glow", "Dots", 0.4, [];
+    DEPTH = "depth", "3D light", "Form", 0.75, [];
+    SOLID = "solid", "Solidity", "Form", 0.5, [];
+    DOTS = "dots", "Dots", "Form", 0.7, [];
+    SOFT = "soft", "Softness", "Form", 0.25, [];
+    GLOW = "glow", "Glow", "Form", 0.3, [];
 
     HUE = "hue", "Colour", "Colour", 0.0, [];
-    PSY = "psy", "Psychedelia", "Colour", 0.45, [];
-    TRAILS = "trails", "Trails", "Colour", 0.5, [];
+    PSY = "psy", "Psychedelia", "Colour", 0.4, [];
+    SMOOTH = "smooth", "Smoothing", "Colour", 0.8, [];
+    TRAILS = "trails", "Echo trails", "Colour", 0.15, [];
     BRIGHTNESS = "brightness", "Brightness", "Colour", 0.5, [];
+
+    FXROUTE = "fxroute", "Routing", "Effects", 0.0, ["Serial", "Parallel"];
+    KALEIDO = "kaleido", "Mirror", "Effects", 0.0, [];
+    TWIST = "twist", "Twist", "Effects", 0.0, [];
+    WAVE = "wave", "Wave", "Effects", 0.0, [];
+    LATTICE = "lattice", "Lattice", "Effects", 0.0, [];
+    SPECTRUM = "spectrum", "Spectrum", "Effects", 0.0, [];
+    CONTOUR = "contour", "Contours", "Effects", 0.0, [];
+    POSTER = "poster", "Posterize", "Effects", 0.0, [];
 
     REACT = "react", "Sound reaction", "Senses", 0.6, [];
     CAMCOL = "camcol", "Camera colours", "Senses", 0.8, [];

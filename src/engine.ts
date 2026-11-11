@@ -28,7 +28,7 @@ interface Exports {
   get_param(id: number): number;
   params_ptr(): number;
   defaults_ptr(): number;
-  evolve(dt: number, kick: number): number;
+  evolve(dt: number, kick: number, phase: number): number;
   genome_len(): number;
   info_ptr(): number;
   love(): void;
@@ -84,10 +84,10 @@ export class Engine {
   /**
    * Advance evolution by `dt` seconds and return the genome currently on screen
    * (a view into wasm memory: read it before the next call). `kick` is a one-off
-   * mutation impulse in 0..1.
+   * mutation impulse in 0..1, `phase` the loop phase in radians.
    */
-  evolve(dt: number, kick: number): Float32Array {
-    const ptr = this.x.evolve(dt, kick);
+  evolve(dt: number, kick: number, phase: number): Float32Array {
+    const ptr = this.x.evolve(dt, kick, phase);
     return new Float32Array(this.x.memory.buffer, ptr, this.genomeLength);
   }
 
