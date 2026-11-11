@@ -10,34 +10,9 @@ export interface ParamDef {
   options: string[];
 }
 
-export type ChatAction =
-  | { t: 'set'; k: string; v: number }
-  | { t: 'preset' }
-  | { t: 'custom' }
-  | { t: 'device'; d: 'camera' | 'mic' | 'screen' | 'file' | 'xy'; on: boolean }
-  | { t: 'res'; v: string }
-  | { t: 'snap' }
-  | { t: 'strike' }
-  | { t: 'save'; name: string }
-  | { t: 'load'; name: string }
-  | { t: 'delete'; name: string }
-  | { t: 'export' }
-  | { t: 'import' }
-  | { t: 'list' }
-  | { t: 'fullscreen' }
-  | { t: 'ui'; on: boolean };
-
-export interface ChatResult {
-  ok: boolean;
-  reply: string;
-  actions: ChatAction[];
-}
-
 interface Exports {
   memory: WebAssembly.Memory;
   init(seed: number, sampleRate: number): void;
-  alloc(len: number): number;
-  free(ptr: number, len: number): void;
   describe_ptr(): number;
   describe_len(): number;
   set_param(id: number, v: number): void;
@@ -50,15 +25,15 @@ interface Exports {
   data_len(): number;
   events_ptr(): number;
   events_len(): number;
-  chat(ptr: number, len: number): number;
-  text_len(): number;
+  ground(x: number, z: number): number;
+  flame_render(iters: number, dt: number, energy: number): number;
+  flame_size(): number;
 }
 
 export class Engine {
   readonly params: ParamDef[];
   readonly world: string;
   readonly byKey = new Map<string, ParamDef>();
-  private enc = new TextEncoder();
   private dec = new TextDecoder();
 
   private constructor(private x: Exports, readonly wasmBytes: ArrayBuffer) {
@@ -113,7 +88,7 @@ export class Engine {
     this.x.step(dt, bass, mid, high);
   }
 
-  /** World state for the shader: 130 vec4. */
+  /** World state for the shader: 84 vec4. */
   data(): Float32Array {
     return new Float32Array(this.x.memory.buffer, this.x.data_ptr(), this.x.data_len());
   }
@@ -123,17 +98,15 @@ export class Engine {
     return new Float32Array(this.x.memory.buffer, this.x.events_ptr(), this.x.events_len() * 4);
   }
 
-  chat(text: string): ChatResult {
-    const bytes = this.enc.encode(text.slice(0, 2000));
-    const ptr = this.x.alloc(bytes.length);
-    new Uint8Array(this.x.memory.buffer, ptr, bytes.length).set(bytes);
-    const out = this.x.chat(ptr, bytes.length);
-    const json = this.str(out, this.x.text_len());
-    this.x.free(ptr, bytes.length);
-    try {
-      return JSON.parse(json) as ChatResult;
-    } catch {
-      return { ok: false, reply: 'Sorry, I could not parse that.', actions: [] };
-    }
+  /** Height of the sand at (x, z). */
+  ground(x: number, z: number): number {
+    return this.x.ground(x, z);
+  }
+
+  /** Run the fractal flame chaos game and return its square RGBA image. */
+  flame(iters: number, dt: number, energy: number): { pixels: Uint8Array; size: number } {
+    const size = this.x.flame_size();
+    const ptr = this.x.flame_render(iters, dt, energy);
+    return { pixels: new Uint8Array(this.x.memory.buffer, ptr, size * size * 4), size };
   }
 }

@@ -1,46 +1,47 @@
 # NovemberRain
 
-An experimental visual-programming instrument for the browser, in the spirit of TouchDesigner and Unreal Engine. One world, rendered in real time: **a titan skeleton walking through sand dunes in a thunderstorm**. You bend it through a fourth dimension, push it through a routable psychedelic effect chain, play a well-tempered synthesizer alongside it, and steer everything by chat.
+An experimental visual-programming instrument for the browser, in the spirit of TouchDesigner and Unreal Engine. One world, rendered in real time: **a titan skeleton walking through sand dunes in a thunderstorm**. You photograph it like architecture, bend it through a fourth dimension, push it through a routable psychedelic effect chain with fractal flames, and play a well-tempered synthesizer alongside it.
 
 Live: https://xboxzero.github.io/NovemberRain/
 
-Written in **Rust** (compiled to WebAssembly) and **TypeScript** (WebGL2, Web Audio).
+Written in **Rust** (compiled to WebAssembly) and **TypeScript** (WebGL, Web Audio).
 
 ## What it does
 
 | | |
 |---|---|
-| **Chat control** | `more lightning, less rain`, `strike the titan`, `make it trippy`, `kaleidoscope 70%`, `effects in parallel`, `key of F sharp minor`, `kirnberger tuning`, `8k`, `snapshot`, `save as my show`. The parser runs locally in Rust. |
-| **Simulation** | Feet are planted on the real dune height field with two-bone IK; the pelvis rides a spring-damper and takes an impulse at every heel strike; arms are driven, damped pendulums. Lightning grows as a stepped leader before the return stroke, prefers the titan as the tallest conductor, and its thunder arrives late by distance / speed of sound. Footfalls throw ballistic dust that a gusting wind field drags away, and leave footprints. |
-| **Rendering** | Raymarched in HDR: soft shadow of the titan from the brightest strike (or the moon), wet-sand specular, in-scattered flash in the haze, cavity occlusion on bone. Fine detail fades by pixel footprint, so more resolution shows more detail. |
-| **Output** | Auto (adaptive), 1080p, 1440p, 4K or 8K live, plus an **8K still** button that renders one 7680-pixel-wide frame to PNG. |
-| **4D** | A tesseract rotated in the xw / yw / zw planes and perspective-projected around the titan; a hyper lens that rotates the image plane through 4-space; dunes and clouds that are slices of 4D fields you drift through. |
-| **Psychedelic FX** | Kaleidoscope (segments, spin), tunnel / infinite zoom (speed), liquid (scale), spectrum mapping (bands, flow), neon edges, RGB split, posterize / solarize, glitch, feedback trails (zoom, twist, colour cycle). |
-| **Signal routing** | The FX chain runs in **serial** (each effect feeds the next) or **parallel** (each effect processes the clean signal and the results are summed). The audio effects have the same switch: echo into reverb, or echo beside reverb. |
-| **Sound** | Every pitch is looked up in a well temperament: Werckmeister III (default), Kirnberger III, Vallotti, Young II, with equal temperament for comparison. Organ chords, pedal bass and a harpsichord-like melody play a minor-key progression, so changing **Key** changes the size of the thirds and fifths you hear. Thunder, footfalls and the crack of a direct hit are triggered by the simulation. |
-| **Inputs** | Camera, microphone (drives the visuals), screen or tab capture, video file, keyboard (A-K notes, Z/X octave, Space throws lightning, 1-2 presets), mouse, touchscreen (orbit, pinch zoom, XY synth pad). |
+| **Runs on modest hardware** | One set of GLSL ES 1.00 shaders serves both WebGL2 and WebGL1. Three detail tiers; the renderer steps down automatically if a tier will not compile or will not hold the frame rate. All buffers are plain 8-bit and live at an adaptive internal resolution; the final pass sharpens while stretching to the display. |
+| **8K without the memory** | The canvas matches the display's real pixels (an 8K screen gets an 8K canvas) while the heavy work stays at the internal resolution. **8K PNG** renders the frozen frame in 512-pixel tiles and streams them band by band through the browser's native deflate into the file, so neither GPU nor page ever holds the full image. |
+| **Skeleton** | Built from anatomical parts: vertebral column, sloped ribs with costal arch and sternum, clavicles and scapulae, iliac bowl with sacrum and pubic arch, femur with neck and trochanter, patella, tibia and fibula, heel, arch and toes, radius and ulna, palm and fingers, cranium with brow ridge, orbits, nasal aperture, zygomatic arches, teeth and a hinged mandible. |
+| **Dunes** | Transverse dunes with the real cross-section: a long windward slope, a sharp crest and a slip face near the angle of repose (measured maximum 35 degrees), sinuous crest lines, interdune flats, wind ripples that fade by pixel footprint, footprints and damp sand. |
+| **Architectural camera** | The camera stands on the sand at eye height, the film plane stays vertical and the lens is shifted rather than tilted, so verticals never converge (two-point perspective). Controls: distance, eye height, lens from wide to tele, lens shift. |
+| **Simulation** | Feet planted on the terrain with two-bone IK, a spring-damper pelvis that takes an impulse at every heel strike, pendulum arms, stepped-leader lightning that prefers the titan, thunder delayed by distance, wind-driven ballistic dust. |
+| **Fractal flame** | A real flame generator in Rust: an iterated function system of three drifting affine maps with blended non-linear variations (linear, sinusoidal, spherical, swirl, horseshoe, bubble), rotational symmetry, iterated colour and log-density tone mapping. Controls: amount, variation, symmetry, morph speed, size. |
+| **Psychedelic FX** | Kaleidoscope, tunnel, liquid and glitch remap the image plane *before* rays are cast, so they cost nothing extra and stay sharp at any resolution. Spectrum, neon edges, posterize, RGB split and feedback trails follow. Both stages run in **serial** or **parallel**; the audio effects have the same switch. |
+| **Sound** | Every pitch comes from a well temperament (Werckmeister III by default, Kirnberger III, Vallotti, Young II, equal for comparison). Organ chords, pedal bass and a harpsichord-like melody in a selectable key; thunder, footfalls and strikes triggered by the simulation. |
+| **Inputs** | Camera, microphone, screen capture, video file, keyboard (A-K notes, Z/X octave, Space throws lightning), mouse, touchscreen (drag, pinch, XY synth pad). |
 | **Presets** | 1 Titan Storm, 2 Custom: save, load, export and import your own. |
 
 ## How it is built
 
 ```
-engine/            Rust crate -> engine.wasm (plain C ABI, no JS glue)
+engine/            Rust crate -> engine.wasm (about 100 kB, plain C ABI, no JS glue)
   src/params.rs    parameter table shared by everything (the UI is generated from it)
-  src/sim.rs       physics: terrain, walk, IK, pendulums, lightning, wind, dust, tesseract
+  src/sim.rs       physics: terrain, walk, IK, pendulums, lightning, wind, dust
+  src/flame.rs     fractal flame chaos game
   src/synth.rs     the well-tempered synthesizer
-  src/chat.rs      natural-language command parser
 src/               TypeScript
-  main.ts          app shell: UI, chat, presets, input, resolution, main loop
-  gl.ts            WebGL2 renderer (world -> HDR target -> FX chain -> grade)
-  shaders/world.ts the raymarched world
-  shaders/post.ts  the FX chain with serial / parallel routing, and the final grade
+  main.ts          app shell: UI, presets, input, camera, resolution governor, still export
+  gl.ts            WebGL1/2 renderer: world -> FX -> sharpen and grade; tiled stills
+  png.ts           streaming PNG encoder
+  shaders/         world (three tiers), FX chain, final pass
   audio.ts         Web Audio graph and analysers
   synth.worklet.ts AudioWorklet hosting a second instance of the Rust engine
   media.ts         camera, screen capture, video file
   presets.ts       custom preset storage, export, import
 ```
 
-The same `engine.wasm` is instantiated twice: on the main thread for simulation and chat, and inside an AudioWorklet for sound. The dune height function exists in both Rust and GLSL and must stay identical, because the simulation plants the titan's feet on the surface the shader draws.
+The dune height function exists in both Rust and GLSL and must stay identical, because the simulation plants the titan's feet on the surface the shader draws.
 
 ## Run it
 
@@ -53,14 +54,16 @@ npm run dev      # build the engine and start the dev server
 npm run build    # production build in dist/
 ```
 
+URL switches for testing: `?gl=1` forces WebGL1, `?tier=0|1|2` pins the detail tier, `?scale=0.5` pins the internal resolution.
+
 ## Deploying
 
 `.github/workflows/deploy.yml` builds and publishes to GitHub Pages on every push. In the repository settings, set **Pages -> Build and deployment -> Source** to **GitHub Actions** once.
 
 ## Limits worth knowing
 
-- **8K is a lot of pixels.** Live 8K raymarching needs a high-end desktop GPU and roughly 1 GB of video memory; most machines will run it at a few frames per second, and phones cap out at their maximum texture size (often 4096). The 8K still works on more hardware because it is one frame. Stills do not include feedback trails.
-- **"Physical" here means integrated dynamics, not a rigid-body or fluid solver.** Springs, pendulums, ballistic particles and IK run every frame; sand does not flow and bones do not collide.
-- **The chat is a rule-based parser, not a language model.** It understands parameters, quantities, moods, colours, keys, tunings, devices and presets, not open-ended requests.
+- **Live 8K means an 8K canvas fed from a lower internal resolution**, sharpened on the way up. Tracing every one of 33 million pixels per frame is beyond any phone; the 8K PNG is where every pixel is traced.
+- An 8K still takes from seconds to a few minutes depending on the GPU. It freezes one instant; trails in it come from the on-screen frame.
+- WebGL1 support assumes a GPU that can compile at least the minimal tier. Very old integrated graphics may still refuse, in which case the start screen says so.
+- "Physical" means integrated dynamics (springs, pendulums, ballistic particles, IK), not a rigid-body or fluid solver.
 - The effect order inside each stage is fixed.
-- Camera, microphone and screen capture need HTTPS and your permission.

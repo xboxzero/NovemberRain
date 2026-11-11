@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <meta name="theme-color" content="#05070c" />
-    <meta name="description" content="NovemberRain: an experimental chat-driven visual and sound instrument that runs in the browser. Rust + TypeScript, WebGL2, WebAssembly." />
+    <meta name="description" content="NovemberRain: an experimental visual and sound instrument that runs in the browser. Rust + TypeScript, WebGL, WebAssembly." />
     <title>NovemberRain</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2305070c'/%3E%3Cpath d='M18 3 8 18h7l-2 11 11-16h-7z' fill='%23ffb84a'/%3E%3C/svg%3E" />
   </head>
@@ -19,7 +19,7 @@
         <nav id="presets" aria-label="Presets"></nav>
         <div class="tools">
           <span id="stat" title="Frames per second and render resolution"></span>
-          <button id="btn-chat" class="tool on" title="Chat (Enter)">Chat</button>
+          <button id="btn-strike" class="tool" title="Throw lightning at the titan (Space)">&#9889;</button>
           <button id="btn-panel" class="tool on" title="Controls">Controls</button>
           <button id="btn-full" class="tool" title="Fullscreen">Full</button>
           <button id="btn-hide" class="tool" title="Hide interface (Tab)">Hide</button>
@@ -37,15 +37,18 @@
             <button data-dev="xy">XY synth pad</button>
           </div>
           <div class="row">
-            <label for="res">Output</label>
-            <select id="res">
+            <label for="quality">Quality</label>
+            <select id="quality">
               <option value="auto">Auto (adaptive)</option>
-              <option value="1080p">1080p</option>
-              <option value="1440p">1440p</option>
-              <option value="4k">4K</option>
-              <option value="8k">8K</option>
+              <option value="eco">Eco (fastest)</option>
+              <option value="balanced">Balanced</option>
+              <option value="sharp">Sharp (native pixels)</option>
             </select>
-            <button id="btn-snap" type="button" title="Render one frame at 8K and save it as PNG">8K still</button>
+          </div>
+          <div class="row">
+            <label>Still</label>
+            <button id="btn-4k" type="button" title="Render the current frame 3840 pixels wide and save it as PNG">4K PNG</button>
+            <button id="btn-8k" type="button" title="Render the current frame 7680 pixels wide, tile by tile, and save it as PNG">8K PNG</button>
           </div>
         </details>
 
@@ -64,19 +67,12 @@
         </details>
 
         <div id="sliders"></div>
-        <p class="hint">Keys A&ndash;K play notes &middot; Z/X octave &middot; Space throws lightning &middot; 1&ndash;2 presets &middot; drag to orbit &middot; scroll or pinch to zoom &middot; Tab hides the interface</p>
+        <p class="hint">Drag sideways to orbit, up and down to raise the camera &middot; scroll or pinch for distance &middot; keys A&ndash;K play notes, Z/X octave &middot; Space throws lightning &middot; 1&ndash;2 presets &middot; Tab hides the interface</p>
       </aside>
 
-      <section id="chat" aria-label="Chat">
-        <div id="log" aria-live="polite"></div>
-        <div id="chips"></div>
-        <form id="chat-form">
-          <input id="chat-input" type="text" placeholder="Tell me what to change…  e.g. more lightning, make it trippy" autocomplete="off" enterkeyhint="send" />
-          <button type="submit">Send</button>
-        </form>
-      </section>
 
       <div id="toast" role="status"></div>
+      <div id="progress" hidden><div id="progress-bar"></div><span id="progress-text"></span></div>
     </div>
 
     <button id="unhide" title="Show interface (Tab)">UI</button>
@@ -84,8 +80,8 @@
     <div id="splash">
       <div class="card">
         <h1>NOVEMBER<b>RAIN</b></h1>
-        <p>A titan skeleton walks through sand dunes under a thunderstorm. Bend it through the fourth dimension, run it through a psychedelic effect chain, and steer everything by chat.</p>
-        <p class="small">Physically simulated motion, a well-tempered synthesizer, up to 8K output. Connect your camera, microphone, screen, keyboard, mouse or touchscreen.</p>
+        <p>A titan skeleton walks through sand dunes under a thunderstorm. Photograph it like architecture, bend it through the fourth dimension, and run it through a psychedelic effect chain with fractal flames.</p>
+        <p class="small">Physically simulated motion, a well-tempered synthesizer, 8K stills on any device. Works with camera, microphone, screen capture, keyboard, mouse and touch.</p>
         <button id="start">Start with sound</button>
         <button id="start-silent" class="ghost">Start silent</button>
         <p id="splash-status" class="small"></p>

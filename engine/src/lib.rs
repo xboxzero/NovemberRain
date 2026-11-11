@@ -1,15 +1,15 @@
 //! NovemberRain engine. Compiled to a plain `wasm32-unknown-unknown` module with a
 //! C ABI (no JS glue), so the very same binary can be instantiated on the main
-//! thread (simulation + chat parser) and inside an AudioWorklet (synthesizer).
+//! thread (simulation + fractal flame) and inside an AudioWorklet (synthesizer).
 
-mod chat;
+mod flame;
 mod params;
 mod rng;
 mod sim;
 mod synth;
 
+use flame::Flame;
 use params::{defaults, NP};
-use rng::Rng;
 use sim::Sim;
 use synth::Synth;
 
@@ -17,8 +17,8 @@ struct Engine {
     params: [f32; NP],
     sim: Sim,
     synth: Synth,
-    rng: Rng,
-    text: String,
+    flame: Option<Flame>,
+    seed: u32,
     defaults: [f32; NP],
     describe: String,
 }
@@ -29,8 +29,8 @@ impl Engine {
             params: defaults(),
             sim: Sim::new(seed),
             synth: Synth::new(seed, sample_rate),
-            rng: Rng::new(seed ^ 0xC0FF_EE11),
-            text: String::new(),
+            flame: None,
+            seed,
             defaults: defaults(),
             describe: params::describe_json(),
         }
@@ -59,21 +59,6 @@ pub extern "C" fn init(seed: u32, sample_rate: f32) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn alloc(len: usize) -> *mut u8 {
-    let mut v = Vec::<u8>::with_capacity(len.max(1));
-    let p = v.as_mut_ptr();
-    core::mem::forget(v);
-    p
-}
-
-/// # Safety
-/// `ptr`/`len` must come from a previous `alloc(len)` call.
-#[no_mangle]
-pub unsafe extern "C" fn free(ptr: *mut u8, len: usize) {
-    drop(Vec::from_raw_parts(ptr, 0, len.max(1)));
-}
-
 // ---- description / parameters ----------------------------------------------------
 
 #[no_mangle]
@@ -84,11 +69,6 @@ pub extern "C" fn describe_ptr() -> *const u8 {
 #[no_mangle]
 pub extern "C" fn describe_len() -> usize {
     eng().describe.len()
-}
-
-#[no_mangle]
-pub extern "C" fn param_count() -> usize {
-    NP
 }
 
 #[no_mangle]
@@ -149,6 +129,13 @@ pub extern "C" fn events_len() -> usize {
     eng().sim.n_events
 }
 
+/// Height of the dune surface, so the camera can stand on the sand.
+#[no_mangle]
+pub extern "C" fn ground(x: f32, z: f32) -> f32 {
+    let e = eng();
+    sim::dune(x, z, e.params[params::FOLD], e.sim.w())
+}
+
 /// Throw a lightning bolt right now; `to_titan` != 0 aims it at the skull.
 #[no_mangle]
 pub extern "C" fn strike(to_titan: u32) {
@@ -157,25 +144,24 @@ pub extern "C" fn strike(to_titan: u32) {
     e.sim.strike(1.0, to_titan != 0, fold);
 }
 
-// ---- chat ----------------------------------------------------------------------------
+// ---- fractal flame -------------------------------------------------------------------
 
-/// Parse a UTF-8 chat message. Returns a pointer to a JSON string; its length is `text_len()`.
-///
-/// # Safety
-/// `ptr`/`len` must describe valid memory inside this instance.
+/// Advance the fractal flame by `iters` chaos-game iterations and return a pointer
+/// to its RGBA8 image (`flame_size()` squared pixels).
 #[no_mangle]
-pub unsafe extern "C" fn chat(ptr: *const u8, len: usize) -> *const u8 {
+pub extern "C" fn flame_render(iters: usize, dt: f32, energy: f32) -> *const u8 {
     let e = eng();
-    let bytes = core::slice::from_raw_parts(ptr, len);
-    let input = String::from_utf8_lossy(bytes);
-    let seed = e.rng.next();
-    e.text = chat::parse(&input, &e.params, seed);
-    e.text.as_ptr()
+    let seed = e.seed;
+    let p = e.params;
+    let w = e.sim.w();
+    let f = e.flame.get_or_insert_with(|| Flame::new(seed));
+    f.render(iters.min(2_000_000), dt, p[params::FLAMEVAR], p[params::FLAMESYM], p[params::FLAMESPEED], w, p[params::HUE], energy);
+    f.rgba.as_ptr()
 }
 
 #[no_mangle]
-pub extern "C" fn text_len() -> usize {
-    eng().text.len()
+pub extern "C" fn flame_size() -> usize {
+    flame::SIZE
 }
 
 // ---- synthesizer -------------------------------------------------------------------
@@ -212,9 +198,4 @@ pub extern "C" fn render(frames: usize) -> *const f32 {
 #[no_mangle]
 pub extern "C" fn render_right_ptr() -> *const f32 {
     eng().synth.out_r.as_ptr()
-}
-
-#[no_mangle]
-pub extern "C" fn max_frames() -> usize {
-    synth::MAX_FRAMES
 }

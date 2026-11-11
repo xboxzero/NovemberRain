@@ -1,36 +1,40 @@
 import './style.css';
-import { Engine, type ChatAction } from './engine';
-import { Renderer } from './gl';
+import { Engine } from './engine';
+import { Renderer, type Frame } from './gl';
 import { AudioEngine } from './audio';
 import { Media } from './media';
 import { PresetStore, exportPreset, importPreset, type Preset } from './presets';
+import { PngStream } from './png';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const clamp = (v: number, a = 0, b = 1): number => Math.min(b, Math.max(a, v));
 
-const CHIPS = ['more lightning', 'strike the titan', 'make it trippy', 'effects in parallel', 'make it 4d', 'kirnberger tuning', 'key of G minor', 'clean', 'help'];
 const NOTE_KEYS: Record<string, number> = {
   KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13, KeyL: 14,
 };
-/** Output modes: number of lines rendered (0 = follow the window and adapt). */
-const RESOLUTIONS: Record<string, number> = { auto: 0, '1080p': 1080, '1440p': 1440, '4k': 2160, '8k': 4320 };
-const CAM = { yaw: 0.22, pitch: -0.16, pmin: -0.3, pmax: 1.0 };
+/** Internal pixel budget per shader tier (megapixels) and quality mode. */
+const BUDGET = { auto: [0.5, 1.1, 2.4], eco: [0.2, 0.3, 0.45], balanced: [0.45, 0.9, 1.6], sharp: [99, 99, 99] } as const;
+type Quality = keyof typeof BUDGET;
+const FLAME_ITERS = [30_000, 60_000, 110_000];
+const TILE = 512;
 
 async function boot(): Promise<void> {
   const splashStatus = $('splash-status');
   const canvas = $<HTMLCanvasElement>('view');
+  const query = new URLSearchParams(location.search);
+  const mobile = window.matchMedia('(pointer: coarse)').matches || window.innerWidth < 760;
   let renderer: Renderer;
   let engine: Engine;
   try {
-    renderer = new Renderer(canvas);
-    [engine] = await Promise.all([Engine.load(`${import.meta.env.BASE_URL}engine.wasm`), renderer.init()]);
+    renderer = new Renderer(canvas, query.get('gl') === '1');
+    engine = await Engine.load(`${import.meta.env.BASE_URL}engine.wasm`);
   } catch (e) {
     splashStatus.textContent = `Cannot start: ${(e as Error).message}`;
     $<HTMLButtonElement>('start').disabled = true;
+    $<HTMLButtonElement>('start-silent').disabled = true;
     return;
   }
 
-  const query = new URLSearchParams(location.search);
   const audio = new AudioEngine();
   const media = new Media();
   const store = new PresetStore();
@@ -38,31 +42,21 @@ async function boot(): Promise<void> {
   const val = (key: string): number => engine.getParam(P(key));
 
   let activePreset = 0;
-  let yaw = CAM.yaw;
-  let pitch = CAM.pitch;
+  let yaw = 0.25;
   let orbitPhase = 0;
   let xyOn = false;
   let octave = 0;
-  let resMode = 'auto';
+  let quality: Quality = 'auto';
   let busy = false;
 
   // ------------------------------------------------------------------ feedback
   const toastEl = $('toast');
   let toastTimer = 0;
-  const toast = (text: string, ms = 2600): void => {
+  const toast = (text: string, ms = 2800): void => {
     toastEl.textContent = text;
     toastEl.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), ms);
-  };
-  const log = $('log');
-  const say = (text: string, cls: 'user' | 'bot' | 'bot err' = 'bot'): void => {
-    const d = document.createElement('div');
-    d.className = `msg ${cls}`;
-    d.textContent = text;
-    log.appendChild(d);
-    while (log.children.length > 60) log.firstChild?.remove();
-    log.scrollTop = log.scrollHeight;
   };
 
   // ------------------------------------------------------------------ parameters
@@ -80,7 +74,7 @@ async function boot(): Promise<void> {
   {
     const host = $('sliders');
     const groups = new Map<string, HTMLDetailsElement>();
-    const openGroups = new Set(['World', '4D', 'Psychedelic FX']);
+    const openGroups = new Set(mobile ? ['World'] : ['World', 'Camera', 'Psychedelic FX']);
     for (const p of engine.params) {
       let g = groups.get(p.group);
       if (!g) {
@@ -183,22 +177,11 @@ async function boot(): Promise<void> {
     }
   };
 
-  const savePreset = (name: string): string => {
-    const n = name.trim() || $<HTMLInputElement>('save-name').value.trim() || 'Custom';
-    store.save(currentPreset(n));
-    $<HTMLInputElement>('save-name').value = n;
-    activePreset = 1;
-    markPreset();
-    renderSaved();
-    return n;
-  };
-
   const loadDefault = (): void => {
     setAll(engine.defaults());
     activePreset = 0;
     markPreset();
-    yaw = CAM.yaw;
-    pitch = CAM.pitch;
+    yaw = 0.25;
     orbitPhase = 0;
   };
 
@@ -230,27 +213,31 @@ async function boot(): Promise<void> {
     presetButtons.push(b);
   }
 
-  // ------------------------------------------------------------------ output resolution
-  const resSelect = $<HTMLSelectElement>('res');
-  const setResolution = (mode: string): void => {
-    if (!(mode in RESOLUTIONS)) return;
-    resMode = mode;
-    resSelect.value = mode;
-    renderer.fixedHeight = RESOLUTIONS[mode];
-    if (renderer.fixedHeight) {
-      renderer.scale = 1;
-      const w = Math.round((renderer.fixedHeight * canvas.clientWidth) / Math.max(1, canvas.clientHeight));
-      if (Math.max(w, renderer.fixedHeight) > renderer.maxSize) toast(`This GPU tops out at ${renderer.maxSize}px: rendering as large as it allows`, 5000);
-      else if (renderer.fixedHeight >= 2160) toast(`Rendering every frame at ${mode.toUpperCase()}. Expect a low frame rate without a high-end GPU.`, 5000);
-    } else {
-      renderer.scale = 0.6;
-    }
-  };
-  resSelect.addEventListener('change', () => setResolution(resSelect.value));
-  canvas.addEventListener('webglcontextlost', (e) => {
+  $<HTMLFormElement>('save-form').addEventListener('submit', (e) => {
     e.preventDefault();
-    toast('The GPU ran out of memory at this resolution. Reloading in Auto…', 4000);
-    setTimeout(() => location.reload(), 1800);
+    const n = $<HTMLInputElement>('save-name').value.trim() || 'Custom';
+    store.save(currentPreset(n));
+    $<HTMLInputElement>('save-name').value = n;
+    activePreset = 1;
+    markPreset();
+    renderSaved();
+    toast(`Saved "${n}"`);
+  });
+  $('btn-export').addEventListener('click', () => exportPreset(currentPreset($<HTMLInputElement>('save-name').value.trim() || 'Custom')));
+  $('btn-import').addEventListener('click', () => $<HTMLInputElement>('file-preset').click());
+  $('btn-reset').addEventListener('click', loadDefault);
+  $<HTMLInputElement>('file-preset').addEventListener('change', (e) => {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    (e.target as HTMLInputElement).value = '';
+    if (!f) return;
+    importPreset(f)
+      .then((p) => {
+        store.save(p);
+        renderSaved();
+        applyPreset(p);
+        toast(`Imported "${p.name}"`);
+      })
+      .catch((err: Error) => toast(err.message));
   });
 
   // ------------------------------------------------------------------ devices
@@ -274,12 +261,12 @@ async function boot(): Promise<void> {
       } else if (d === 'xy') {
         xyOn = on;
         if (!on) audio.post({ t: 'xy', x: 0.5, y: 0.5, d: false });
-        toast(on ? 'XY pad on: drag on the picture to play (left-right pitch, up-down filter)' : 'XY pad off: drag orbits the camera');
+        toast(on ? 'XY pad on: drag on the picture to play (left-right pitch, up-down filter)' : 'XY pad off: drag moves the camera');
       }
     } catch (e) {
       const err = e as Error;
       const denied = err.name === 'NotAllowedError' || err.name === 'SecurityError';
-      say(denied ? `I was not given permission to use the ${d}. Allow it in the browser's site settings and try again.` : `Could not start the ${d}: ${err.message}`, 'bot err');
+      toast(denied ? `Permission to use the ${d} was not given. Allow it in the browser's site settings.` : `Could not start the ${d}: ${err.message}`, 5000);
     }
     refreshDevices();
   };
@@ -288,30 +275,8 @@ async function boot(): Promise<void> {
   }
   $<HTMLInputElement>('file-video').addEventListener('change', (e) => {
     const f = (e.target as HTMLInputElement).files?.[0];
-    if (f) media.file(f).catch((err: Error) => say(`Could not play that file: ${err.message}`, 'bot err'));
+    if (f) media.file(f).catch((err: Error) => toast(`Could not play that file: ${err.message}`, 5000));
     (e.target as HTMLInputElement).value = '';
-  });
-
-  // ------------------------------------------------------------------ preset panel
-  $<HTMLFormElement>('save-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    toast(`Saved "${savePreset($<HTMLInputElement>('save-name').value)}"`);
-  });
-  $('btn-export').addEventListener('click', () => exportPreset(currentPreset($<HTMLInputElement>('save-name').value.trim() || 'Custom')));
-  $('btn-import').addEventListener('click', () => $<HTMLInputElement>('file-preset').click());
-  $('btn-reset').addEventListener('click', loadDefault);
-  $<HTMLInputElement>('file-preset').addEventListener('change', (e) => {
-    const f = (e.target as HTMLInputElement).files?.[0];
-    (e.target as HTMLInputElement).value = '';
-    if (!f) return;
-    importPreset(f)
-      .then((p) => {
-        store.save(p);
-        renderSaved();
-        applyPreset(p);
-        toast(`Imported "${p.name}"`);
-      })
-      .catch((err: Error) => toast(err.message));
   });
 
   // ------------------------------------------------------------------ interface chrome
@@ -322,26 +287,30 @@ async function boot(): Promise<void> {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void document.documentElement.requestFullscreen?.().catch(() => toast('Fullscreen is not available here'));
   };
-  const togglePane = (pane: string, btn: string): void => {
-    const el = $(pane);
+  $('btn-panel').addEventListener('click', () => {
+    const el = $('panel');
     el.hidden = !el.hidden;
-    $(btn).classList.toggle('on', !el.hidden);
-  };
-  $('btn-chat').addEventListener('click', () => togglePane('chat', 'btn-chat'));
-  $('btn-panel').addEventListener('click', () => togglePane('panel', 'btn-panel'));
+    $('btn-panel').classList.toggle('on', !el.hidden);
+  });
   $('btn-full').addEventListener('click', fullscreen);
   $('btn-hide').addEventListener('click', () => setUi(false));
   $('unhide').addEventListener('click', () => setUi(true));
-  if (window.matchMedia('(max-width: 760px)').matches) togglePane('panel', 'btn-panel');
+  $('btn-strike').addEventListener('click', () => engine.strike(true));
+  if (mobile) $('btn-panel').click();
+  const qualitySelect = $<HTMLSelectElement>('quality');
+  qualitySelect.addEventListener('change', () => {
+    quality = qualitySelect.value as Quality;
+  });
 
-  // ------------------------------------------------------------------ drawing
+  // ------------------------------------------------------------------ frame assembly
   const stat = $('stat');
-  const data = new Float32Array(520);
-  const fixedScale = Number(query.get('scale')) || 0; // ?scale=0.5 pins the internal scale in Auto mode
-  if (fixedScale) renderer.scale = clamp(fixedScale, 0.1, 1);
+  const data = new Float32Array(336);
+  const pointers = new Map<number, { x: number; y: number }>();
+  let flameDt = 0;
+  let flameTick = 0;
 
-  /** Advance the world by `dt` seconds and draw one frame at the current buffer size. */
-  const draw = (now: number, dt: number): void => {
+  /** Advance the world by `dt` seconds and describe the frame to draw. */
+  const compose = (now: number, dt: number): Frame => {
     audio.update();
     const react = val('react') * 1.6;
     const bass = clamp(audio.bands.bass * react);
@@ -352,29 +321,49 @@ async function boot(): Promise<void> {
     for (let i = 0; i < ev.length; i += 4) audio.post({ t: 'ev', k: ev[i], a: ev[i + 1], b: ev[i + 2] });
     data.set(engine.data());
 
-    // The camera sways around the walking titan and shakes with every footfall.
+    const flame = val('flame');
+    // The chaos game runs every frame on the full tier, every other frame below it.
+    flameDt += dt;
+    if (flame > 0.003 && dt > 0 && (renderer.tier === 2 || ++flameTick % 2 === 0)) {
+      const f = engine.flame(FLAME_ITERS[renderer.tier], flameDt, bass);
+      renderer.setFlame(f.pixels, f.size);
+      flameDt = 0;
+    }
+
+    // Architectural camera: it stands on the sand at eye height, the film plane stays
+    // vertical and the lens is shifted (not tilted) to take in the whole titan.
     if (!pointers.size || xyOn) orbitPhase += dt * val('orbit') * 0.5;
     const y = yaw + Math.sin(orbitPhase) * 0.9;
-    const dist = data[519] * (1.9 - 1.45 * val('zoom'));
-    const tgt = [data[516], data[517], data[518]];
-    const shake = data[72] * 0.6;
-    const pos = [
-      tgt[0] + dist * Math.cos(pitch) * Math.sin(y) + Math.sin(now * 0.05) * shake,
-      tgt[1] + dist * Math.sin(pitch) + Math.cos(now * 0.043) * shake,
-      tgt[2] + dist * Math.cos(pitch) * Math.cos(y),
-    ];
+    const dist = data[335] * (0.35 + 1.4 * val('zoom'));
+    const tx = data[332];
+    const ty = data[333];
+    const tz = data[334];
+    const cx = tx + dist * Math.sin(y);
+    const cz = tz + dist * Math.cos(y);
+    const eye = val('eye');
+    const shake = data[72] * 0.5;
+    const cy = engine.ground(cx, cz) + 1.3 + eye * eye * 70 + Math.cos(now * 0.043) * shake;
+    const fx = (tx - cx) / dist;
+    const fz = (tz - cz) / dist;
+    const lens = val('lens');
+    const focal = 0.8 + Math.pow(lens, 1.5) * 4.2;
+    const rise = ((ty - cy) / dist) * focal + (val('shift') - 0.5) * 1.6;
     const time = now / 1000;
     const au = [bass, mid, high, (bass + mid + high) / 3];
-    renderer.render({
+    return {
       world: {
-        uTime: time,
-        uCamPos: pos,
-        uCamTgt: tgt,
+        uCamPos: [cx + Math.sin(now * 0.05) * shake, cy, cz],
+        uCamR: [-fz, 0, fx],
+        uCamF: [fx, 0, fz],
+        uLens: [focal, rise, val('warp'), time],
         uD: data,
-        uP: [val('storm'), val('rain'), val('sand'), val('warp')],
-        uQ: [val('tess'), val('fold'), 0, 0],
+        uP: [val('storm'), val('rain'), val('sand'), val('fold')],
+        uP2: [Math.pow(2, (val('brightness') - 0.5) * 4), 0, 0, 0],
+        uFx1: [val('kaleido'), val('kseg'), val('kspin'), Math.round(val('route'))],
+        uFx2: [val('tunnel'), val('tunspeed'), val('liquid'), val('liqscale')],
+        uFx3: [val('glitch'), 0, 0, 0],
         uAudio: au,
-        uW: data[513],
+        uW: data[329],
       },
       fx: {
         uTime: time,
@@ -386,156 +375,78 @@ async function boot(): Promise<void> {
         uGlitch: val('glitch'),
         uCamMix: media.camOn ? val('cammix') : 0,
         uVidMix: media.vidKind ? val('vidmix') : 0,
-        uKal: [val('kaleido'), val('kseg'), val('kspin')],
         uFb: [val('feedback'), val('fbzoom'), val('fbrot'), val('fbhue')],
-        uTun: [val('tunnel'), val('tunspeed')],
-        uLiq: [val('liquid'), val('liqscale')],
         uAcid: [val('acid'), val('acidcyc'), val('acidspeed')],
+        uFlameP: [flame, val('flamezoom')],
         uAudio: au,
       },
-      grade: {
-        uTime: time,
-        uHue: val('hue'),
-        uSat: val('saturation'),
-        uBright: val('brightness'),
-        uContrast: val('contrast'),
-        uGlitch: val('glitch'),
-      },
+      grade: { uTime: time, uHue: val('hue'), uSat: val('saturation'), uContrast: val('contrast'), uGlitch: val('glitch') },
       cam: media.camOn ? media.cam : null,
       vid: media.vidKind ? media.vid : null,
-    });
+    };
   };
 
-  /** Render a single frame 7680 pixels wide (or as large as the GPU allows) and download it. */
-  const snapshot = async (): Promise<void> => {
+  // ------------------------------------------------------------------ high-resolution stills
+  const progress = $('progress');
+  const nextFrame = (): Promise<void> => new Promise((r) => requestAnimationFrame(() => r()));
+
+  /**
+   * Render the current frame `width` pixels wide and save it as PNG. The image is
+   * drawn in small tiles and streamed into the encoder band by band, so neither the
+   * GPU nor the browser ever holds the full picture: this is what lets a phone make an 8K image.
+   */
+  const still = async (width: number): Promise<void> => {
     if (busy || !renderer.ready) return;
+    if (!PngStream.supported) return toast('This browser cannot stream-compress images. Please update it to export stills.', 6000);
     busy = true;
-    toast('Rendering an 8K still…', 20000);
-    await new Promise((r) => setTimeout(r, 60)); // let the toast paint before the GPU stalls
-    const keep = { fixed: renderer.fixedHeight, scale: renderer.scale };
+    const W = width;
+    const H = Math.max(2, Math.round((W * canvas.clientHeight) / Math.max(1, canvas.clientWidth)));
+    progress.hidden = false;
+    const setProgress = (f: number, text: string): void => {
+      $('progress-bar').style.width = `${Math.round(f * 100)}%`;
+      $('progress-text').textContent = text;
+    };
+    setProgress(0, `Rendering ${W}×${H}…`);
     try {
-      const width = Math.min(Number(query.get('snap')) || 7680, renderer.maxSize);
-      renderer.fixedHeight = Math.round((width * canvas.clientHeight) / Math.max(1, canvas.clientWidth));
-      renderer.scale = 1;
-      renderer.resize();
-      draw(performance.now(), 0);
-      const size = `${canvas.width}×${canvas.height}`;
-      const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'));
-      if (!blob) throw new Error('the browser could not encode the image');
+      const frame = compose(performance.now(), 0); // freeze this instant
+      renderer.render(frame);
+      await nextFrame();
+      const png = new PngStream(W, H);
+      const band = new Uint8Array(W * TILE * 4);
+      const tilePx = new Uint8Array(TILE * TILE * 4);
+      const bands = Math.ceil(H / TILE);
+      for (let j = 0; j < bands; j++) {
+        const rows = Math.min(TILE, H - j * TILE); // image rows j*TILE .. j*TILE+rows, from the top
+        const oy = H - j * TILE - rows; // GL y of the band's bottom edge
+        for (let ox = 0; ox < W; ox += TILE) {
+          const w = Math.min(TILE, W - ox);
+          if (renderer.lost) throw new Error('the graphics context was lost');
+          renderer.tile(frame, W, H, ox, oy, TILE, w, rows, tilePx);
+          for (let r = 0; r < rows; r++) band.set(tilePx.subarray(r * w * 4, (r + 1) * w * 4), (r * W + ox) * 4);
+        }
+        await png.write(band.subarray(0, W * rows * 4), rows);
+        setProgress((j + 1) / bands, `Rendering ${W}×${H}… ${Math.round(((j + 1) / bands) * 100)}%`);
+        await nextFrame(); // keep the page responsive and the GPU watchdog calm
+      }
+      setProgress(1, 'Saving…');
+      const blob = await png.finish();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = `novemberrain-${canvas.width}x${canvas.height}.png`;
+      a.download = `novemberrain-${W}x${H}.png`;
       a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-      toast(`Saved a ${size} still`);
-      document.body.dataset.snap = size;
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toast(`Saved ${W}×${H} (${(blob.size / 1048576).toFixed(1)} MB)`, 5000);
+      document.body.dataset.still = `${W}x${H}:${blob.size}`;
     } catch (e) {
-      say(`The still could not be rendered: ${(e as Error).message}`, 'bot err');
+      toast(`The still could not be rendered: ${(e as Error).message}`, 6000);
     } finally {
-      renderer.fixedHeight = keep.fixed;
-      renderer.scale = keep.scale;
-      renderer.freeTargets();
-      renderer.resize();
+      renderer.freeTiles();
+      progress.hidden = true;
       busy = false;
     }
   };
-  $('btn-snap').addEventListener('click', () => void snapshot());
-
-  // ------------------------------------------------------------------ chat
-  const exec = async (a: ChatAction): Promise<void> => {
-    switch (a.t) {
-      case 'set': {
-        const def = engine.byKey.get(a.k);
-        if (def) setParam(def.id, a.v);
-        break;
-      }
-      case 'preset':
-        loadDefault();
-        break;
-      case 'custom':
-        loadCustom();
-        break;
-      case 'device':
-        await device(a.d, a.on);
-        break;
-      case 'res':
-        setResolution(a.v);
-        break;
-      case 'snap':
-        await snapshot();
-        break;
-      case 'strike':
-        engine.strike(true);
-        break;
-      case 'save':
-        savePreset(a.name);
-        break;
-      case 'load': {
-        const p = store.get(a.name);
-        if (p) {
-          applyPreset(p);
-          say(`Loaded "${p.name}".`);
-        } else {
-          const names = store.list().map((x) => x.name);
-          say(names.length ? `I have no preset called "${a.name}". Saved: ${names.join(', ')}.` : `I have no preset called "${a.name}" - nothing is saved yet.`, 'bot err');
-        }
-        break;
-      }
-      case 'delete':
-        say(store.delete(a.name) ? `Deleted "${a.name}".` : `I have no preset called "${a.name}".`);
-        renderSaved();
-        break;
-      case 'list': {
-        const names = store.list().map((x) => x.name);
-        say(names.length ? `Saved presets: ${names.join(', ')}.` : 'No custom presets saved yet. Say "save as <name>".');
-        break;
-      }
-      case 'export':
-        exportPreset(currentPreset($<HTMLInputElement>('save-name').value.trim() || 'Custom'));
-        break;
-      case 'import':
-        $<HTMLInputElement>('file-preset').click();
-        break;
-      case 'fullscreen':
-        fullscreen();
-        break;
-      case 'ui':
-        setUi(a.on);
-        break;
-    }
-  };
-
-  const chat = async (text: string): Promise<void> => {
-    text = text.trim();
-    if (!text) return;
-    say(text, 'user');
-    const res = engine.chat(text);
-    if (res.reply) say(res.reply, res.ok ? 'bot' : 'bot err');
-    for (const a of res.actions) {
-      try {
-        await exec(a);
-      } catch (e) {
-        say(`That did not work: ${(e as Error).message}`, 'bot err');
-      }
-    }
-  };
-  const chatInput = $<HTMLInputElement>('chat-input');
-  $<HTMLFormElement>('chat-form').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const t = chatInput.value;
-    chatInput.value = '';
-    void chat(t);
-  });
-  {
-    const chips = $('chips');
-    for (const c of CHIPS) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = c;
-      b.addEventListener('click', () => void chat(c));
-      chips.appendChild(b);
-    }
-  }
+  $('btn-4k').addEventListener('click', () => void still(Number(query.get('still')) || 3840));
+  $('btn-8k').addEventListener('click', () => void still(Number(query.get('still')) || 7680));
 
   // ------------------------------------------------------------------ keyboard
   const typing = (e: KeyboardEvent): boolean => {
@@ -554,14 +465,6 @@ async function boot(): Promise<void> {
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === 'Enter' || e.key === '/') {
-      e.preventDefault();
-      setUi(true);
-      $('chat').hidden = false;
-      $('btn-chat').classList.add('on');
-      chatInput.focus();
-      return;
-    }
     if (e.code === 'Space') {
       e.preventDefault();
       if (!e.repeat) engine.strike(true);
@@ -583,7 +486,6 @@ async function boot(): Promise<void> {
   });
 
   // ------------------------------------------------------------------ mouse and touch
-  const pointers = new Map<number, { x: number; y: number }>();
   let pinch = 0;
   const xyAt = (e: PointerEvent, down: boolean): void => {
     const r = canvas.getBoundingClientRect();
@@ -607,12 +509,12 @@ async function boot(): Promise<void> {
       if (xyOn) xyAt(e, true);
       else {
         yaw -= dx * 0.005;
-        pitch = clamp(pitch + dy * 0.004, CAM.pmin, CAM.pmax);
+        setParam(P('eye'), val('eye') + dy * 0.0012); // drag down: the camera rises
       }
     } else if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (pinch > 0) setParam(P('zoom'), val('zoom') + (d - pinch) * 0.003);
+      if (pinch > 0) setParam(P('zoom'), val('zoom') - (d - pinch) * 0.003);
       pinch = d;
     }
   });
@@ -628,20 +530,19 @@ async function boot(): Promise<void> {
   canvas.addEventListener('pointercancel', release);
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    setParam(P('zoom'), val('zoom') - e.deltaY * 0.0006);
+    setParam(P('zoom'), val('zoom') + e.deltaY * 0.0006);
   }, { passive: false });
 
   // ------------------------------------------------------------------ start-up
   const start = async (withSound: boolean): Promise<void> => {
-    const btn = $<HTMLButtonElement>('start');
     if (withSound) {
-      btn.disabled = true;
+      $<HTMLButtonElement>('start').disabled = true;
       splashStatus.textContent = 'Starting the synthesizer…';
       try {
         await audio.start(engine.wasmBytes, [...engine.values()]);
       } catch (e) {
         console.error(e);
-        say(`Sound could not start (${(e as Error).message}). The visuals still work.`, 'bot err');
+        toast(`Sound could not start (${(e as Error).message}). The visuals still work.`, 6000);
       }
     }
     $('splash').classList.add('gone');
@@ -653,48 +554,67 @@ async function boot(): Promise<void> {
   refreshDevices();
   loadDefault();
   splashStatus.textContent = 'Building the world…';
+  // Start modest on phones and on WebGL1 hardware; the renderer steps down further by itself
+  // if a tier will not compile, and the loop below steps down if it will not run smoothly.
+  const wantTier = query.has('tier') ? Number(query.get('tier')) : renderer.api === 'WebGL1' || mobile ? 1 : 2;
   try {
-    await renderer.prepare();
+    await renderer.init(clamp(wantTier, 0, 2));
   } catch (e) {
     console.error(e);
-    splashStatus.textContent = 'The world shader failed to compile on this GPU.';
+    splashStatus.textContent = `This GPU could not build the world shader (${renderer.api}).`;
     return;
   }
   splashStatus.textContent = '';
-  say('Hi! A titan is crossing the dunes in a thunderstorm. Try "more lightning", "make it trippy", "effects in parallel", "key of G minor", "8k" - or type "help".');
+  const fixedScale = Number(query.get('scale')) || 0;
+  renderer.scale = fixedScale || (mobile ? 0.35 : 0.5);
 
   // ------------------------------------------------------------------ main loop
   let last = performance.now();
   let acc = 0;
   let frames = 0;
   let lastDown = 0;
+  let slow = 0;
+  let switching = false;
   const frame = (now: number): void => {
     requestAnimationFrame(frame);
     const rawDt = (now - last) / 1000;
     last = now;
-    if (busy) return;
+    if (busy || document.hidden) return;
     renderer.resize();
-    draw(now, Math.min(rawDt, 0.1));
+    renderer.render(compose(now, Math.min(rawDt, 0.1)));
 
-    // In Auto mode the internal resolution follows the frame rate.
     if (rawDt < 0.25) {
       acc += rawDt;
       frames++;
     }
-    if (acc >= 0.6) {
-      const fps = frames / acc;
-      if (resMode === 'auto' && !fixedScale) {
-        if (fps < 40 && renderer.scale > 0.3) {
-          renderer.scale = Math.max(0.3, renderer.scale * 0.85);
-          lastDown = now;
-        } else if (fps > 56 && now - lastDown > 5000 && renderer.scale < 1) {
-          renderer.scale = Math.min(1, renderer.scale * 1.07);
-        }
-      }
-      stat.textContent = `${Math.round(fps)} fps · ${Math.round(canvas.width * renderer.scale)}×${Math.round(canvas.height * renderer.scale)}`;
-      acc = 0;
-      frames = 0;
+    if (acc < 0.6) return;
+    const fps = frames / acc;
+    acc = 0;
+    frames = 0;
+    // Resolution governor: hold the frame rate by trading internal pixels, never above the budget.
+    const px = canvas.width * canvas.height;
+    const cap = Math.min(1, Math.sqrt((BUDGET[quality][renderer.tier] * 1e6) / px));
+    const floor = Math.min(cap, 0.16);
+    if (fixedScale) {
+      renderer.scale = fixedScale;
+    } else if (quality === 'sharp') {
+      renderer.scale = 1;
+    } else if (fps < 38 && renderer.scale > floor) {
+      renderer.scale = Math.max(floor, renderer.scale * (fps < 20 ? 0.7 : 0.86));
+      lastDown = now;
+    } else if (fps > 55 && now - lastDown > 4000 && renderer.scale < cap) {
+      renderer.scale = Math.min(cap, renderer.scale * 1.08);
     }
+    if (!fixedScale) renderer.scale = Math.min(renderer.scale, Math.max(cap, floor));
+    // Still crawling at the lowest resolution: drop to a simpler shader.
+    slow = fps < 18 && renderer.scale <= floor * 1.05 ? slow + 1 : 0;
+    if (slow >= 4 && renderer.tier > 0 && !switching && !query.has('tier')) {
+      switching = true;
+      slow = 0;
+      void renderer.setTier(renderer.tier - 1).finally(() => (switching = false));
+    }
+    const [sw, sh] = renderer.internal;
+    stat.textContent = `${Math.round(fps)} fps · ${sw}×${sh} → ${canvas.width}×${canvas.height} · ${renderer.api} T${renderer.tier}`;
   };
   requestAnimationFrame(frame);
 }

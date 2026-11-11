@@ -1,28 +1,27 @@
 //! World simulation: a titan skeleton walking across sand dunes in a thunderstorm.
 //!
-//! Everything here is integrated in time rather than keyframed where it matters:
+//! Everything that matters is integrated in time rather than keyframed:
 //!   * the dune height field is shared with the shader, so feet are planted on the
 //!     real terrain with two-bone IK and the pelvis rides a spring-damper;
 //!   * arms are driven, damped pendulums that get kicked by every heel strike;
 //!   * lightning grows as a stepped leader, then fires a return stroke, prefers the
 //!     tallest conductor (the titan) and its thunder arrives late by distance / speed of sound;
-//!   * footfalls throw ballistic dust that is dragged along by a gusting wind field;
-//!   * a tesseract is rotated in 4D and perspective-projected into the scene.
+//!   * footfalls throw ballistic dust that is dragged along by a gusting wind field.
 //!
-//! State is written to a flat buffer of `ND` vec4s read by the shader as `uD[ND]`:
-//!   0..17    skeleton joints          17  bounding sphere      18 (shake, charge, step age, lean)
-//!   19..25   footprints (x, z, age, depth)
-//!   25..45   dust puffs (xyz, opacity)
-//!   45..105  five bolts x 12 points (xyz, brightness; 0 = break)
-//!   105..110 strike light (xyz, brightness)
-//!   110      wind (x, z, gust, rain)
-//!   112..128 tesseract vertices (xyz, w)
-//!   128      (sim time, w coordinate, 0, 0)       129 (camera target xyz, base distance)
+//! State is written to a flat buffer of `ND` vec4s read by the shader as `uD[ND]`
+//! (kept small so it fits the uniform budget of WebGL1 hardware):
+//!   0..17   skeleton joints         17 bounding box centre    18 (shake, charge, step age, lean)
+//!   19..25  footprints (x, z, age, depth)
+//!   25..37  dust puffs (xyz, opacity)
+//!   37..77  four bolts x 10 points (xyz, brightness; 0 = break)
+//!   77..81  strike light (xyz, brightness)
+//!   81      wind (x, z, gust, rain)
+//!   82      (sim time, w coordinate, 0, 0)      83 (camera target xyz, base distance)
 
 use crate::params::*;
 use crate::rng::Rng;
 
-pub const ND: usize = 130;
+pub const ND: usize = 84;
 pub const MAX_EVENTS: usize = 16;
 
 pub const EV_THUNDER: f32 = 1.0;
@@ -32,7 +31,9 @@ pub const EV_ZAP: f32 = 3.0;
 const PI: f32 = core::f32::consts::PI;
 const TAU: f32 = PI * 2.0;
 const SOUND_SPEED: f32 = 55.0;
-const N_DUST: usize = 20;
+const N_DUST: usize = 12;
+const N_BOLT: usize = 4;
+const BOLT_PTS: usize = 10;
 const N_PRINTS: usize = 6;
 
 type V3 = [f32; 3];
@@ -68,14 +69,19 @@ fn norm(a: V3) -> V3 {
 }
 
 /// Dune height. MUST stay identical to `dune()` in the fragment shader.
+///
+/// Transverse dunes with the real cross-section: a long, gentle windward slope,
+/// a sharp crest and a short slip face near the angle of repose (about 33 degrees),
+/// flat interdune corridors, sinuous crest lines and varying heights.
 pub fn dune(x: f32, z: f32, fold: f32, w: f32) -> f32 {
-    let qx = x * 0.05;
-    let qz = z * 0.05;
-    let warp = (qz * 0.9 + 1.3).sin() * 1.2 + (qx * 0.37 + qz * 0.61).sin() * 0.8 + fold * 1.4 * (w * 0.3 + qz * 0.5).sin();
-    let a = qx * 1.7 + warp;
-    let crest = 1.0 - (a + 0.45 * (2.0 * a).sin()).sin().abs();
-    let amp = 0.55 + 0.45 * (qx * 0.31 - qz * 0.43 + 2.0).sin();
-    4.2 * crest.max(0.0).powf(1.5) * amp + 1.1 * (qx * 0.83 + 0.5).sin() * (qz * 0.71 + 1.7).sin()
+    let qx = x * 0.03;
+    let qz = z * 0.03;
+    let warp = 1.3 * (qx * 1.1 + 1.3).sin() + 0.6 * (qx * 2.3 + qz * 0.7 + 0.4).sin() + fold * 1.2 * (w * 0.3 + qx * 0.9).sin();
+    let a = qz * 2.4 + warp;
+    // phase-skewed sine: slow rise, fast fall
+    let prof = 0.5 + 0.5 * (a + 0.6 * a.cos()).sin();
+    let amp = 0.6 + 0.4 * (qx * 0.7 - qz * 0.5 + 2.0).sin();
+    8.0 * amp * prof.max(0.0).powf(1.4) + 1.2 * (qx * 0.9 + 0.5).sin() * (qz * 0.6 + 1.7).sin()
 }
 
 #[derive(Clone, Copy)]
@@ -86,7 +92,7 @@ struct Bolt {
     power: f32,
     to_titan: bool,
     landed: bool,
-    pts: [V3; 12],
+    pts: [V3; BOLT_PTS],
 }
 
 #[derive(Clone, Copy)]
@@ -107,7 +113,7 @@ pub struct Sim {
     wind_ang: f32,
     wind: [f32; 2],
     gust: f32,
-    bolts: [Bolt; 5],
+    bolts: [Bolt; N_BOLT],
     bolt_timer: f32,
     pending: [[f32; 3]; 8], // delayed thunder: (time left, power, pan)
     // titan
@@ -140,7 +146,7 @@ impl Sim {
             wind_ang: 0.6,
             wind: [0.0; 2],
             gust: 0.5,
-            bolts: [Bolt { life: 99.0, leader: 0.2, dur: 0.5, power: 0.0, to_titan: false, landed: true, pts: [[0.0; 3]; 12] }; 5],
+            bolts: [Bolt { life: 99.0, leader: 0.2, dur: 0.5, power: 0.0, to_titan: false, landed: true, pts: [[0.0; 3]; BOLT_PTS] }; N_BOLT],
             bolt_timer: 0.6,
             pending: [[-1.0, 0.0, 0.0]; 8],
             started: false,
@@ -159,6 +165,11 @@ impl Sim {
             dust: [Dust { p: [0.0; 3], v: [0.0; 3], age: 1.0 }; N_DUST],
             dust_i: 0,
         }
+    }
+
+    /// Current position along the 4th dimension.
+    pub fn w(&self) -> f32 {
+        self.w
     }
 
     #[inline]
@@ -209,21 +220,22 @@ impl Sim {
             let ez = z + self.rng.s() * 8.0;
             ([x, self.rng.range(36.0, 44.0), z], [ex, dune(ex, ez, fold, self.w), ez], r)
         };
-        let mut pts = [[0.0f32; 3]; 12];
-        for i in 0..9 {
-            let u = i as f32 / 8.0;
-            let jag = if i == 0 { 0.0 } else if i == 8 { 0.0 } else { 2.6 };
+        // 7 points of main channel (6 segments) + a 3-point fork.
+        let mut pts = [[0.0f32; 3]; BOLT_PTS];
+        for i in 0..7 {
+            let u = i as f32 / 6.0;
+            let jag = if i == 0 || i == 6 { 0.0 } else { 3.0 };
             pts[i] = [
                 top[0] + (end[0] - top[0]) * u + self.rng.s() * jag,
                 top[1] + (end[1] - top[1]) * u + self.rng.s() * jag * 0.35,
                 top[2] + (end[2] - top[2]) * u + self.rng.s() * jag,
             ];
         }
-        let k = 2 + (self.rng.next() % 4) as usize;
+        let k = 1 + (self.rng.next() % 4) as usize;
         let dir = [self.rng.s(), 0.0, self.rng.s()];
-        pts[9] = pts[k];
-        pts[10] = add(pts[k], [dir[0] * 5.0 + self.rng.s(), -4.0, dir[2] * 5.0 + self.rng.s()]);
-        pts[11] = add(pts[10], [dir[0] * 4.0 + self.rng.s() * 2.0, -4.5, dir[2] * 4.0 + self.rng.s() * 2.0]);
+        pts[7] = pts[k];
+        pts[8] = add(pts[k], [dir[0] * 5.0 + self.rng.s(), -4.0, dir[2] * 5.0 + self.rng.s()]);
+        pts[9] = add(pts[8], [dir[0] * 4.0 + self.rng.s() * 2.0, -4.5, dir[2] * 4.0 + self.rng.s() * 2.0]);
         let leader = self.rng.range(0.14, 0.26);
         self.bolts[slot] = Bolt { life: 0.0, leader, dur: self.rng.range(0.5, 1.0), power, to_titan, landed: false, pts };
         // Thunder leaves at the return stroke and travels at the speed of sound.
@@ -254,10 +266,8 @@ impl Sim {
         self.step_titan(dt, dt_real, p, bass, fold, w);
         self.step_lightning(dt_real, p, bass, high, fold);
         self.step_dust(dt_real, fold, w);
-        self.step_tesseract(p);
-
-        self.put(110, self.wind[0], self.wind[1], self.gust, p[RAIN]);
-        self.put(128, self.t, self.w, 0.0, 0.0);
+        self.put(81, self.wind[0], self.wind[1], self.gust, p[RAIN]);
+        self.put(82, self.t, self.w, 0.0, 0.0);
     }
 
     // ------------------------------------------------------------------ titan
@@ -291,7 +301,7 @@ impl Sim {
                 let sm = u * u * (3.0 - 2.0 * u);
                 (-STRIDE * 0.5 + STRIDE * sm, 3.0 * (PI * u).sin())
             };
-            let fx = sx * 2.0;
+            let fx = sx * 1.5;
             let g = dune(fx, z + fz, fold, w);
             ground[side] = g;
             feet[side] = [fx, g + 0.7 + lift, z + fz];
@@ -330,7 +340,7 @@ impl Sim {
         }
 
         // Pelvis: spring-damper riding above the lower foot so both legs can reach.
-        let target = ground[0].min(ground[1]) + 10.9 - 0.4 * (ph * 2.0 * TAU).cos().abs() + bass * 0.2;
+        let target = ground[0].min(ground[1]) + 10.7 - 0.4 * (ph * 2.0 * TAU).cos().abs() + bass * 0.2;
         if !self.started {
             self.started = true;
             self.pelvis_y = target;
@@ -344,7 +354,8 @@ impl Sim {
         }
         let sway = 0.55 * s2;
         let slope = (dune(0.0, z + 3.0, fold, w) - dune(0.0, z - 3.0, fold, w)) / 6.0;
-        let lean = 0.9 + slope * 1.6 + self.wind[1] * 0.02;
+        // lean into the climb, sit back on the descent
+        let lean = 0.9 + slope * 2.6 + self.wind[1] * 0.02;
         let pelvis = [sway, self.pelvis_y, z];
         let spine = [sway * 0.7, pelvis[1] + 3.4, z + lean * 0.3];
         let chest = [sway * 0.4 + self.wind[0] * 0.012, pelvis[1] + 7.0, z + lean * 0.8];
@@ -360,7 +371,7 @@ impl Sim {
         for side in 0..2 {
             let sx = if side == 0 { -1.0 } else { 1.0 };
             // Leg: two-bone IK from hip to the planted / swinging foot.
-            let hip = [pelvis[0] + sx * 1.7, pelvis[1] - 0.4, z];
+            let hip = [pelvis[0] + sx * 2.1, pelvis[1] - 0.4, z];
             let d = sub(feet[side], hip);
             let dl = len(d).clamp(0.5, L1 + L2 - 0.02);
             let dn = norm(d);
@@ -384,7 +395,7 @@ impl Sim {
                 self.arm_th[side] += self.arm_om[side] * h;
             }
             let th = self.arm_th[side].clamp(-1.4, 1.4);
-            let sh = [chest[0] + sx * 3.3, chest[1] + 0.9, chest[2] - sx * 0.3 * c2];
+            let sh = [chest[0] + sx * 3.5, chest[1] + 1.4, chest[2] - 0.4 - sx * 0.3 * c2];
             let elbow = add(sh, [sx * 0.7, -th.cos() * 5.2, th.sin() * 5.2]);
             // The forearm trails the upper arm like the second link of a double pendulum.
             let th2 = th + 0.4 - self.arm_om[side].clamp(-2.0, 2.0) * 0.12;
@@ -394,13 +405,13 @@ impl Sim {
             self.put(b + 1, elbow[0], elbow[1], elbow[2], 1.0);
             self.put(b + 2, hand[0], hand[1], hand[2], 1.0);
         }
-        self.put(17, 0.0, pelvis[1] + 1.5, z + 0.5, 17.0);
+        self.put(17, pelvis[0], pelvis[1] + 1.2, z + 0.6, 0.0);
         self.put(18, self.shake, self.charge, self.step_age, lean);
         for i in 0..N_PRINTS {
             let q = self.prints[i];
             self.put(19 + i, q[0], q[1], q[2], (-q[2] * 0.06).exp());
         }
-        self.put(129, 0.0, pelvis[1] + 1.0, z, 46.0);
+        self.put(83, 0.0, pelvis[1] + 1.0, z, 46.0);
     }
 
     // -------------------------------------------------------------- lightning
@@ -422,23 +433,23 @@ impl Sim {
                 self.strike(power * 0.7, false, fold);
             }
         }
-        for b in 0..5 {
+        for b in 0..N_BOLT {
             let mut bolt = self.bolts[b];
             bolt.life += dt_real;
-            let mut seg = [0.0f32; 12];
+            let mut seg = [0.0f32; BOLT_PTS];
             let mut light = 0.0;
             if bolt.life < bolt.leader {
                 // Stepped leader: a faint channel creeping toward the ground.
-                let prog = bolt.life / bolt.leader * 8.0;
-                for i in 0..8 {
+                let prog = bolt.life / bolt.leader * 6.0;
+                for i in 0..6 {
                     if (i as f32) < prog {
                         let tip = if (i as f32 + 1.0) >= prog { 3.0 } else { 1.0 };
                         seg[i] = 0.05 * bolt.power * tip;
                     }
                 }
-                if prog > 5.0 {
-                    seg[9] = 0.04 * bolt.power;
-                    seg[10] = 0.04 * bolt.power;
+                if prog > 4.0 {
+                    seg[7] = 0.04 * bolt.power;
+                    seg[8] = 0.04 * bolt.power;
                 }
             } else {
                 // Return stroke with decaying re-strikes.
@@ -448,15 +459,15 @@ impl Sim {
                     let restrike = 0.55 + 0.45 * (u * 31.0 + b as f32).sin().abs();
                     let flicker = 0.75 + 0.25 * self.rng.f();
                     light = bolt.power * env * restrike * flicker * (1.0 + high);
-                    for i in 0..8 {
+                    for i in 0..6 {
                         seg[i] = light;
                     }
-                    seg[9] = light * 0.5;
-                    seg[10] = light * 0.5;
+                    seg[7] = light * 0.5;
+                    seg[8] = light * 0.5;
                 }
                 if !bolt.landed {
                     bolt.landed = true;
-                    let e = bolt.pts[8];
+                    let e = bolt.pts[6];
                     if bolt.to_titan {
                         self.charge = 1.0;
                         self.emit(EV_ZAP, bolt.power, 0.0, 0.0);
@@ -469,12 +480,12 @@ impl Sim {
                 }
             }
             self.bolts[b] = bolt;
-            for i in 0..12 {
+            for i in 0..BOLT_PTS {
                 let q = bolt.pts[i];
-                self.put(45 + b * 12 + i, q[0], q[1], q[2], seg[i]);
+                self.put(37 + b * BOLT_PTS + i, q[0], q[1], q[2], seg[i]);
             }
-            let e = bolt.pts[8];
-            self.put(105 + b, e[0], e[1], e[2], light);
+            let e = bolt.pts[6];
+            self.put(77 + b, e[0], e[1], e[2], light);
         }
         // Thunder that is still on its way.
         for i in 0..self.pending.len() {
@@ -510,38 +521,6 @@ impl Sim {
             }
             let a = if d.age < 1.0 { (1.0 - d.age).powf(1.5) * (d.age * 10.0).min(1.0) } else { 0.0 };
             self.put(25 + i, d.p[0], d.p[1], d.p[2], a);
-        }
-    }
-
-    // -------------------------------------------------------------- tesseract
-
-    fn step_tesseract(&mut self, p: &[f32; NP]) {
-        let c = [self.data[8], self.data[9] - 1.0, self.data[10]]; // chest
-        let a1 = self.w * 0.6 + self.t * 0.07;
-        let a2 = self.w * 0.37 + 1.0;
-        let a3 = self.w * 0.23 + 2.0;
-        let a4 = self.t * 0.09;
-        let scale = 6.0 + 3.0 * p[TESS];
-        for i in 0..16 {
-            let mut v = [
-                if i & 1 == 0 { -1.0 } else { 1.0 },
-                if i & 2 == 0 { -1.0 } else { 1.0 },
-                if i & 4 == 0 { -1.0 } else { 1.0 },
-                if i & 8 == 0 { -1.0f32 } else { 1.0 },
-            ];
-            let rot = |v: &mut [f32; 4], i: usize, j: usize, a: f32| {
-                let (s, c) = a.sin_cos();
-                let (x, y) = (v[i], v[j]);
-                v[i] = x * c - y * s;
-                v[j] = x * s + y * c;
-            };
-            rot(&mut v, 0, 3, a1);
-            rot(&mut v, 1, 3, a2);
-            rot(&mut v, 2, 3, a3);
-            rot(&mut v, 0, 2, a4);
-            // Perspective projection from 4D into 3D.
-            let k = scale * 1.9 / (2.7 - v[3]);
-            self.put(112 + i, c[0] + v[0] * k, c[1] + v[1] * k, c[2] + v[2] * k, v[3]);
         }
     }
 }
